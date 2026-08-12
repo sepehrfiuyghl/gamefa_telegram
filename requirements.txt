@@ -1,0 +1,4 @@
+aiogram>=3.20,<4
+aiohttp>=3.11
+beautifulsoup4>=4.12
+openai>=1.100
