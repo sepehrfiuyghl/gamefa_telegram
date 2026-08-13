@@ -23,7 +23,8 @@ from aiogram.types import (
     KeyboardButton,
 )
 
-from openai import AsyncOpenAI
+from google import genai
+from google.genai import types
 
 
 # ============================================================
@@ -32,7 +33,7 @@ from openai import AsyncOpenAI
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 
 CHANNEL_ID = os.getenv(
     "CHANNEL_ID",
@@ -40,8 +41,8 @@ CHANNEL_ID = os.getenv(
 ).strip()
 
 MODEL = os.getenv(
-    "OPENAI_MODEL",
-    "gpt-5.4-mini"
+    "GEMINI_MODEL",
+    "gemini-2.5-flash"
 ).strip()
 
 try:
@@ -985,14 +986,76 @@ async def fetch_gamefa(url):
 
 def get_ai_client():
 
-    if not OPENAI_API_KEY:
+    if not GEMINI_API_KEY:
         raise RuntimeError(
-            "OPENAI_API_KEY تنظیم نشده است."
+            "GEMINI_API_KEY تنظیم نشده است."
         )
 
-    return AsyncOpenAI(
-        api_key=OPENAI_API_KEY
+    return genai.Client(
+        api_key=GEMINI_API_KEY
     )
+
+
+async def gemini_generate(
+    *,
+    system_instruction,
+    prompt,
+    max_output_tokens=1800,
+    response_mime_type=None
+):
+    """
+    ارسال درخواست به Gemini به‌صورت asynchronous.
+    SDK رسمی google-genai از client.aio استفاده می‌کند.
+    """
+
+    client = get_ai_client()
+
+    config_kwargs = {
+        "system_instruction": system_instruction,
+        "max_output_tokens": max_output_tokens,
+        "temperature": 0.2,
+    }
+
+    if response_mime_type:
+        config_kwargs["response_mime_type"] = response_mime_type
+
+    try:
+        response = await client.aio.models.generate_content(
+            model=MODEL,
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                **config_kwargs
+            )
+        )
+
+        result = (
+            getattr(response, "text", None)
+            or ""
+        ).strip()
+
+        if not result:
+            raise RuntimeError(
+                "Gemini خروجی خالی تولید کرد."
+            )
+
+        return result
+
+    except Exception as error:
+        message = str(error)
+
+        if "429" in message or "RESOURCE_EXHAUSTED" in message:
+            raise RuntimeError(
+                "سهمیه Gemini تمام شده یا محدودیت درخواست فعال شده است."
+            ) from error
+
+        if "401" in message or "403" in message or "PERMISSION_DENIED" in message:
+            raise RuntimeError(
+                "کلید Gemini معتبر نیست یا دسترسی API برای آن فعال نشده است."
+            ) from error
+
+        raise RuntimeError(
+            f"خطا در ارتباط با Gemini: {message}"
+        ) from error
 
 
 # ============================================================
@@ -1096,8 +1159,6 @@ importance باید عددی بین 1 تا 5 باشد.
 
 async def extract_facts(source):
 
-    client = get_ai_client()
-
     prompt_input = (
         "عنوان مقاله:\n"
         + source.get("title", "")
@@ -1109,17 +1170,12 @@ async def extract_facts(source):
         + source.get("body", "")
     )
 
-    response = await client.responses.create(
-        model=MODEL,
-        instructions=FACT_PROMPT,
-        input=prompt_input,
-        max_output_tokens=3000
+    raw = await gemini_generate(
+        system_instruction=FACT_PROMPT,
+        prompt=prompt_input,
+        max_output_tokens=3000,
+        response_mime_type="application/json"
     )
-
-    raw = (
-        response.output_text
-        or ""
-    ).strip()
 
     raw = re.sub(
         r"^```json\s*",
@@ -1367,8 +1423,6 @@ async def generate_news(
     retry_instruction=""
 ):
 
-    client = get_ai_client()
-
     facts_json = json.dumps(
         facts,
         ensure_ascii=False,
@@ -1388,17 +1442,11 @@ async def generate_news(
         + retry_instruction
     )
 
-    response = await client.responses.create(
-        model=MODEL,
-        instructions=NEWS_PROMPT,
-        input=input_text,
+    result = await gemini_generate(
+        system_instruction=NEWS_PROMPT,
+        prompt=input_text,
         max_output_tokens=1800
     )
-
-    result = (
-        response.output_text
-        or ""
-    ).strip()
 
     if not result:
 
@@ -2164,9 +2212,28 @@ async def process_news(
 
         if not valid:
 
-            raise RuntimeError(
-                "خروجی AI پس از بازسازی هنوز ساختار صحیح ندارد."
-            )
+            title, sentences = split_sentences(generated)
+
+            if len(sentences) >= 5:
+
+                sentences = sentences[:7]
+
+                while len(sentences) < 7:
+                    sentences.append(
+                        "جزئیات بیشتری درباره این خبر منتشر نشده است."
+                    )
+
+                generated = (
+                    title
+                    + "\n"
+                    + "\n".join(sentences)
+                )
+
+            else:
+
+                raise RuntimeError(
+                    "خروجی AI قابل اصلاح نیست."
+                )
 
         # ====================================================
         # FORMAT
@@ -2919,10 +2986,10 @@ async def main():
             "BOT_TOKEN تنظیم نشده است."
         )
 
-    if not OPENAI_API_KEY:
+    if not GEMINI_API_KEY:
 
         raise RuntimeError(
-            "OPENAI_API_KEY تنظیم نشده است."
+            "GEMINI_API_KEY تنظیم نشده است."
         )
 
     if not ADMIN_ID:
