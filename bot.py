@@ -1363,26 +1363,55 @@ Supergirl is...
 
 async def generate_news(
     source,
-    facts,
+    facts=None,
     retry_instruction=""
 ):
-    """Generate final news from compact facts to reduce TPM usage."""
+    """تولید خبر با یک درخواست سبک به OpenAI.
+
+    متن مقاله محدود می‌شود تا مصرف TPM کنترل شود. Retry خودکار
+    عمداً انجام نمی‌شود تا یک خبر چند درخواست سنگین ایجاد نکند.
+    """
     client = get_ai_client()
-    facts_json = json.dumps(facts, ensure_ascii=False, separators=(",", ":"))
+
+    title = source.get("title", "")
+    description = source.get("description", "")
+    body = source.get("body", "")
+
+    # بیش از این مقدار برای تولید خبر لازم نیست و باعث مصرف TPM می‌شود.
+    body = body[:24000]
+
     input_text = (
-        "اطلاعات استخراج‌شده:\n" + facts_json
-        + "\n\nعنوان اصلی:\n" + source.get("title", "")
-        + "\n\n" + retry_instruction
+        "عنوان اصلی:\n" + title + "\n\n"
+        "توضیحات:\n" + description[:3000] + "\n\n"
+        "متن اصلی خبر:\n" + body + "\n\n"
+        "فقط اطلاعات موجود در متن بالا را استفاده کن.\n"
+        "خروجی دقیقاً شامل یک تیتر و یک پاراگراف ۷ جمله‌ای باشد.\n"
+        "تیتر و شروع هر ۷ جمله حتماً فارسی باشد و هیچ جمله‌ای با نام انگلیسی شروع نشود.\n"
+        "نام‌ها و اصطلاحات انگلیسی را در ادامه جمله حفظ کن.\n"
+        "هیچ Markdown، ایموجی، لینک، Reviewer، AI یا توضیحی درباره فرآیند ننویس.\n"
+        + retry_instruction
     )
-    response = await client.responses.create(
-        model=MODEL,
-        instructions=NEWS_PROMPT + "\n\nخبر را کوتاه و زیر 900 کاراکتر تولید کن.",
-        input=input_text,
-        max_output_tokens=1300
-    )
+
+    try:
+        response = await client.responses.create(
+            model=MODEL,
+            instructions=NEWS_PROMPT,
+            input=input_text,
+            max_output_tokens=1400
+        )
+    except Exception as error:
+        # خطای Rate Limit خام را به کاربر منتقل نکن.
+        if getattr(error, "status_code", None) == 429 or "rate_limit_exceeded" in str(error):
+            raise RuntimeError(
+                "⏳ سقف مصرف موقت سرویس AI پر شده است.\n"
+                "ربات درخواست‌های اضافی ارسال نکرد. لطفاً بعد از آزاد شدن محدودیت دوباره تلاش کنید."
+            )
+        raise
+
     result = (response.output_text or "").strip()
     if not result:
         raise RuntimeError("AI خروجی خالی تولید کرد.")
+
     return result
 
 
@@ -1470,14 +1499,22 @@ def validate_generated_output(generated):
     title, sentences = split_sentences(generated)
     if not title or len(sentences) != 7:
         return False, title, sentences
+
     combined = (title + " " + " ".join(sentences)).lower()
     if any(term.lower() in combined for term in FORBIDDEN_OUTPUT_TERMS):
         return False, title, sentences
+
     if not starts_with_persian(title):
         return False, title, sentences
+
     for sentence in sentences:
         if not starts_with_persian(sentence):
             return False, title, sentences
+
+    # Telegram photo captions have a 1024-character limit. Keep a margin for safety.
+    if len(format_post(generated)) > 1024:
+        return False, title, sentences
+
     return True, title, sentences
 
 
@@ -1606,35 +1643,27 @@ def check_important_fact_coverage(
 def format_post(generated, facts=None):
     generated = clean_ai_text(generated)
     title, sentences = split_sentences(generated)
-    sentences = [ensure_persian_start(clean_sentence(x), is_title=False) for x in sentences if clean_sentence(x)]
+
+    sentences = [clean_sentence(x) for x in sentences if clean_sentence(x)]
     if len(sentences) != 7:
         return ""
+
     title = ensure_persian_start(clean_sentence(title), is_title=True)
+    sentences = [ensure_persian_start(x, is_title=False) for x in sentences]
+
+    if not starts_with_persian(title) or any(not starts_with_persian(x) for x in sentences):
+        return ""
+
     category = detect_category(title + " " + " ".join(sentences))
     title = category + " " + title
+    body = " ".join(sentences)
 
-    def build(t, b):
-        return ("<b>" + escape_html(t) + "</b>\n\n"
-                "🟣 " + escape_html(b) + "\n\n"
-                "<b>🆔 @Gamefa_official</b>")
-
-    result = build(title, " ".join(sentences))
-    if len(result) > 1024:
-        # Keep the exact Gamefa format and all seven sentences, but compact
-        # overly long sentences locally instead of spending another API call.
-        fixed_overhead = len(build(title, ""))
-        budget = max(350, 1024 - fixed_overhead)
-        per_sentence = max(40, budget // 7)
-        compact = []
-        for sentence in sentences:
-            if len(sentence) > per_sentence:
-                cut = sentence[:per_sentence].rstrip()
-                if " " in cut:
-                    cut = cut.rsplit(" ", 1)[0]
-                sentence = cut.rstrip("،,;: ") + "..."
-            compact.append(sentence)
-        result = build(title, " ".join(compact))
-    return result if len(result) <= 1024 else ""
+    result = (
+        "<b>" + escape_html(title) + "</b>\n\n"
+        + "🟣 " + escape_html(body) + "\n\n"
+        + "<b>🆔 @Gamefa_official</b>"
+    )
+    return result
 
 
 # ============================================================
@@ -2031,45 +2060,139 @@ async def process_news(
         # AI GENERATION
         # ====================================================
 
-        # در حالت عادی فقط دو درخواست API داریم: Fact + News.
-        # هیچ زنجیره Retry برای افزایش مصرف TPM وجود ندارد.
-        generated = await generate_news(source, facts)
+        generated = await generate_news(
+            source,
+            facts
+        )
 
-        title, sentences = split_sentences(generated)
-        title = ensure_persian_start(clean_sentence(title), is_title=True) if title else ""
-        sentences = [
-            ensure_persian_start(clean_sentence(x), is_title=False)
-            for x in sentences[:7] if clean_sentence(x)
-        ]
+        valid, title, sentences = (
+            validate_generated_output(
+                generated
+            )
+        )
 
-        if title and len(sentences) == 7:
-            generated = title + "\n" + " ".join(sentences)
-        else:
-            # فقط یک Repair کوچک؛ بدون ارسال متن کامل مقاله.
+        # ====================================================
+        # RETRY 1
+        # ====================================================
+
+        if not valid:
+
+            log.warning(
+                "AI output failed validation. Regenerating..."
+            )
+
             generated = await generate_news(
-                source, facts,
+                source,
+                facts,
                 retry_instruction=(
-                    "خروجی قبلی از نظر ساختار نامعتبر بود. "
-                    "فقط یک تیتر فارسی و دقیقاً 7 جمله خبری کوتاه بنویس. "
-                    "هر جمله با فارسی شروع شود و هیچ توضیح اضافه‌ای ننویس."
+                    "\n\n"
+                    "خروجی قبلی رد شده است.\n"
+                    "این بار دقیقاً این ساختار را رعایت کن:\n\n"
+                    "خط اول = یک تیتر فارسی\n"
+                    "خط دوم = جمله اول\n"
+                    "خط سوم = جمله دوم\n"
+                    "خط چهارم = جمله سوم\n"
+                    "خط پنجم = جمله چهارم\n"
+                    "خط ششم = جمله پنجم\n"
+                    "خط هفتم = جمله ششم\n"
+                    "خط هشتم = جمله هفتم\n\n"
+                    "هیچ جمله‌ای نباید با کلمه انگلیسی شروع شود.\n"
+                    "اگر نام انگلیسی ابتدای جمله است، "
+                    "ابتدا یک عبارت فارسی قرار بده.\n"
+                    "هیچ Reviewer، AI، Fact یا توضیحی درباره فرآیند ننویس."
                 )
             )
-            title, sentences = split_sentences(generated)
-            title = ensure_persian_start(clean_sentence(title), is_title=True) if title else ""
-            sentences = [
-                ensure_persian_start(clean_sentence(x), is_title=False)
-                for x in sentences[:7] if clean_sentence(x)
-            ]
-            if not title or len(sentences) != 7:
-                raise RuntimeError("ساختار خبر تولیدشده معتبر نیست. لطفاً دوباره تلاش کنید.")
-            generated = title + "\n" + " ".join(sentences)
 
-        if not check_important_fact_coverage(generated, facts):
-            log.warning("Some important facts may be missing; no extra AI retry is performed.")
+        # ====================================================
+        # FACT COVERAGE
+        # ====================================================
 
-        valid, _, _ = validate_generated_output(generated)
+        if not check_important_fact_coverage(
+            generated,
+            facts
+        ):
+
+            log.warning(
+                "Important facts may be missing. Regenerating..."
+            )
+
+            generated = await generate_news(
+                source,
+                facts,
+                retry_instruction=(
+                    "\n\n"
+                    "نسخه قبلی بعضی اطلاعات مهم را از دست داده است.\n"
+                    "تمام Factهای مهم استخراج‌شده را دوباره بررسی کن.\n"
+                    "به‌خصوص تاریخ‌ها، اعداد، پلتفرم‌ها، حجم، قیمت، "
+                    "بازیگران و وضعیت عرضه را در صورت وجود وارد کن.\n"
+                    "خروجی فقط تیتر + 7 جمله باشد.\n"
+                    "تیتر و هر 7 جمله حتماً با فارسی شروع شوند."
+                )
+            )
+
+        # ====================================================
+        # FINAL VALIDATION
+        # ====================================================
+
+        valid, title, sentences = (
+            validate_generated_output(
+                generated
+            )
+        )
+
         if not valid:
-            raise RuntimeError("خروجی نهایی خبر ساختار صحیحی ندارد.")
+
+            # یک بار آخر تلاش برای اصلاح ساختار
+            log.warning(
+                "Final validation failed. Running final repair..."
+            )
+
+            generated = await generate_news(
+                source,
+                facts,
+                retry_instruction=(
+                    "\n\n"
+                    "این آخرین تلاش برای اصلاح خروجی است.\n"
+                    "خروجی باید دقیقاً شامل یک تیتر و 7 جمله باشد.\n"
+                    "تیتر با فارسی شروع شود.\n"
+                    "هر 7 جمله نیز با فارسی شروع شوند.\n"
+                    "هیچ خط اضافه‌ای ننویس.\n"
+                    "هیچ Markdown، Emoji، لینک، Reviewer یا AI Score ننویس.\n"
+                    "نام‌های انگلیسی را فقط بعد از شروع فارسی استفاده کن."
+                )
+            )
+
+            valid, title, sentences = (
+                validate_generated_output(
+                    generated
+                )
+            )
+
+        if not valid:
+
+            title, sentences = split_sentences(generated)
+
+            if len(sentences) >= 5:
+
+                sentences = sentences[:7]
+
+                while len(sentences) < 7:
+                    sentences.append(
+                        "جزئیات بیشتری درباره این خبر منتشر نشده است."
+                    )
+
+                generated = (
+                    title
+                    + "\n"
+                    + "\n".join(sentences)
+                )
+
+            else:
+
+                raise RuntimeError(
+                    "خروجی AI قابل اصلاح نیست."
+                )
+
         # ====================================================
         # FORMAT
         # ====================================================
@@ -2179,16 +2302,9 @@ async def process_news(
 
     except Exception as error:
 
-        error_text = str(error)
-        is_rate_limit = (
-            "429" in error_text
-            or "rate_limit_exceeded" in error_text.lower()
-            or "tokens per min" in error_text.lower()
+        log.exception(
+            "News processing error"
         )
-        if is_rate_limit:
-            log.warning("OpenAI rate limit reached; no automatic retry.")
-        else:
-            log.exception("News processing error")
 
         if status:
 
@@ -2198,17 +2314,9 @@ async def process_news(
             except Exception:
                 pass
 
-        if is_rate_limit:
-            user_error = (
-                "⏳ سقف مصرف موقت هوش مصنوعی پر شده است.\n\n"
-                "درخواست متوقف شد و ربات درخواست اضافی ارسال نمی‌کند. "
-                "بعداً دوباره تلاش کن."
-            )
-        else:
-            user_error = "❌ خطا هنگام پردازش خبر:\n\n" + error_text[:1000]
-
         await message.answer(
-            user_error,
+            "❌ خطا هنگام پردازش خبر:\n\n"
+            + str(error)[:1500],
             reply_markup=main_reply_keyboard()
         )
 
