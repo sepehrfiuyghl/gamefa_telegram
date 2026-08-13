@@ -44,11 +44,6 @@ MODEL = os.getenv(
     "gpt-5.4-mini"
 ).strip()
 
-# برای جلوگیری از مصرف بی‌رویه TPM، متن ارسالی به AI محدود می‌شود.
-AI_SOURCE_LIMIT = int(os.getenv("AI_SOURCE_LIMIT", "18000"))
-AI_MAX_OUTPUT_TOKENS = int(os.getenv("AI_MAX_OUTPUT_TOKENS", "1400"))
-AI_MAX_RETRIES = int(os.getenv("AI_MAX_RETRIES", "1"))
-
 try:
     ADMIN_ID = int(
         os.getenv("ADMIN_ID", "0") or "0"
@@ -1095,94 +1090,89 @@ importance باید عددی بین 1 تا 5 باشد.
 """
 
 
-
-def is_rate_limit_error(error):
-    text = str(error).lower()
-    return (
-        "rate_limit_exceeded" in text
-        or "rate limit reached" in text
-        or "error code: 429" in text
-        or "status code 429" in text
-    )
-
-
-def local_facts(source):
-    """Fallback بدون API؛ فقط اطلاعات قابل مشاهده از متن را نگه می‌دارد."""
-    body = clean_text(source.get("body", ""))
-    sentences = re.split(r"(?<=[.!؟])\\s+", body)
-    sentences = [x.strip() for x in sentences if len(x.strip()) > 20]
-    numbers = re.findall(r"\\d+(?:[.,]\\d+)?(?:\\s*(?:GB|TB|درصد|%))?", body, flags=re.I)
-    return {
-        "main_topic": source.get("title", ""),
-        "main_event": sentences[0] if sentences else source.get("title", ""),
-        "facts": [{"fact": x, "importance": 4, "type": "article"} for x in sentences[:10]],
-        "dates": [], "platforms": [], "numbers": numbers[:20],
-        "people": [], "companies": [], "status": "", "important_missing": []
-    }
-
-
-def local_news_fallback(source, facts):
-    """وقتی سهمیه OpenAI تمام شده، ربات متوقف نمی‌شود و همان فرمت ۷ جمله‌ای را می‌سازد."""
-    title = ensure_persian_start(clean_text(source.get("title", "")), True)
-    raw = source.get("body", "") or ""
-    parts = re.split(r"(?<=[.!؟])\\s+", clean_text(raw))
-    parts = [clean_sentence(x) for x in parts if len(clean_sentence(x)) >= 25]
-    fact_parts = []
-    for item in facts.get("facts", []) if isinstance(facts, dict) else []:
-        if isinstance(item, dict) and item.get("fact"):
-            fact_parts.append(clean_sentence(str(item["fact"])))
-    pool = fact_parts + parts
-    pool = [x for x in pool if x]
-    unique = []
-    seen = set()
-    for x in pool:
-        key = norm(x)
-        if key and key not in seen:
-            seen.add(key); unique.append(x)
-    if not title:
-        title = ensure_persian_start(unique[0] if unique else "خبر جدید گیمفا", True)
-    while len(unique) < 7:
-        unique.append("این خبر در ادامه اطلاعات مرتبط با موضوع اصلی را ارائه می‌کند")
-    sentences = [ensure_persian_start(x, False) for x in unique[:7]]
-    return title + "\
-" + " ".join(sentences)
-
 # ============================================================
 # EXTRACT FACTS
 # ============================================================
 
 async def extract_facts(source):
-    """استخراج Fact با یک درخواست سبک؛ در صورت 429، پردازش محلی انجام می‌شود."""
+
     client = get_ai_client()
+
     prompt_input = (
-        "عنوان مقاله:\n" + source.get("title", "") + "\n\n"
-        "توضیحات:\n" + source.get("description", "") + "\n\n"
-        "متن مقاله:\n" + source.get("body", "")[:AI_SOURCE_LIMIT]
+        "عنوان مقاله:\n"
+        + source.get("title", "")
+        + "\n\n"
+        "توضیحات:\n"
+        + source.get("description", "")
+        + "\n\n"
+        "متن کامل مقاله:\n"
+        + source.get("body", "")
     )
+
+    response = await client.responses.create(
+        model=MODEL,
+        instructions=FACT_PROMPT,
+        input=prompt_input,
+        max_output_tokens=3000
+    )
+
+    raw = (
+        response.output_text
+        or ""
+    ).strip()
+
+    raw = re.sub(
+        r"^```json\s*",
+        "",
+        raw,
+        flags=re.I
+    )
+
+    raw = re.sub(
+        r"\s*```$",
+        "",
+        raw
+    )
+
     try:
-        response = await client.responses.create(
-            model=MODEL,
-            instructions=FACT_PROMPT,
-            input=prompt_input,
-            max_output_tokens=1200
+
+        data = json.loads(
+            raw
         )
-        raw = (response.output_text or "").strip()
-        raw = re.sub(r"^```json\s*", "", raw, flags=re.I)
-        raw = re.sub(r"\s*```$", "", raw)
+
+    except Exception:
+
+        start = raw.find("{")
+        end = raw.rfind("}")
+
+        if start == -1 or end == -1:
+
+            raise RuntimeError(
+                "AI نتوانست Factهای مقاله را استخراج کند."
+            )
+
         try:
-            data = json.loads(raw)
-        except Exception:
-            start = raw.find("{")
-            end = raw.rfind("}")
-            if start < 0 or end < 0:
-                raise ValueError("invalid json")
-            data = json.loads(raw[start:end + 1])
-        return data if isinstance(data, dict) else {}
-    except Exception as error:
-        if is_rate_limit_error(error):
-            log.warning("OpenAI rate limit during fact extraction; using local fallback.")
-            return local_facts(source)
-        raise
+
+            data = json.loads(
+                raw[start:end + 1]
+            )
+
+        except Exception as error:
+
+            raise RuntimeError(
+                "JSON استخراج Fact نامعتبر است."
+            ) from error
+
+    if not isinstance(
+        data,
+        dict
+    ):
+
+        raise RuntimeError(
+            "ساختار Fact نامعتبر است."
+        )
+
+    return data
 
 
 # ============================================================
@@ -1371,32 +1361,52 @@ Supergirl is...
 """
 
 
-async def generate_news(source, facts, retry_instruction=""):
-    """یک درخواست AI سبک برای تولید خبر؛ retryهای زنجیره‌ای حذف شده‌اند."""
+async def generate_news(
+    source,
+    facts,
+    retry_instruction=""
+):
+
     client = get_ai_client()
-    facts_json = json.dumps(facts, ensure_ascii=False, separators=(",", ":"))
+
+    facts_json = json.dumps(
+        facts,
+        ensure_ascii=False,
+        indent=2
+    )
+
     input_text = (
-        "FACTS:\n" + facts_json + "\n\n"
-        "عنوان:\n" + source.get("title", "") + "\n\n"
-        "متن اصلی:\n" + source.get("body", "")[:AI_SOURCE_LIMIT] + "\n\n"
+        "FACTS استخراج‌شده از مقاله:\n\n"
+        + facts_json
+        + "\n\n"
+        "عنوان اصلی مقاله:\n"
+        + source.get("title", "")
+        + "\n\n"
+        "متن اصلی مقاله برای بررسی نهایی:\n"
+        + source.get("body", "")
+        + "\n\n"
         + retry_instruction
     )
-    try:
-        response = await client.responses.create(
-            model=MODEL,
-            instructions=NEWS_PROMPT,
-            input=input_text,
-            max_output_tokens=AI_MAX_OUTPUT_TOKENS
+
+    response = await client.responses.create(
+        model=MODEL,
+        instructions=NEWS_PROMPT,
+        input=input_text,
+        max_output_tokens=1800
+    )
+
+    result = (
+        response.output_text
+        or ""
+    ).strip()
+
+    if not result:
+
+        raise RuntimeError(
+            "AI خروجی خالی تولید کرد."
         )
-        result = (response.output_text or "").strip()
-        if not result:
-            raise RuntimeError("AI خروجی خالی تولید کرد.")
-        return result
-    except Exception as error:
-        if is_rate_limit_error(error):
-            log.warning("OpenAI rate limit during news generation; using local fallback.")
-            return local_news_fallback(source, facts)
-        raise
+
+    return result
 
 
 # ============================================================
@@ -1404,48 +1414,36 @@ async def generate_news(source, facts, retry_instruction=""):
 # ============================================================
 
 def split_sentences(text):
+    """Extract title + exactly seven sentences as robustly as possible."""
+    text = clean_ai_text(text)
+    text = text.replace("\r", "\n")
 
-    text = clean_ai_text(
-        text
-    )
+    # Remove accidental labels commonly emitted by models.
+    text = re.sub(r"(?im)^\s*(?:تیتر|عنوان)\s*[:：]\s*", "", text)
+    text = re.sub(r"(?im)^\s*(?:خبر|متن خبر)\s*[:：]\s*", "", text)
 
-    text = text.replace(
-        "\r",
-        "\n"
-    )
-
-    lines = [
-        line.strip()
-        for line in text.splitlines()
-        if line.strip()
-    ]
-
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
     if not lines:
         return "", []
 
-    title = lines[0]
+    title = clean_sentence(lines[0]) if 'clean_sentence' in globals() else lines[0]
+    body = " ".join(lines[1:])
+    body = re.sub(r"\s+", " ", body).strip()
 
-    body = " ".join(
-        lines[1:]
-    )
+    # Sentence punctuation: Persian/Latin full stops and question/exclamation marks.
+    parts = re.split(r"(?<=[.!؟])\s+", body)
+    parts = [x.strip() for x in parts if x.strip()]
 
-    body = re.sub(
-        r"\s+",
-        " ",
-        body
-    ).strip()
+    # Some models omit punctuation. If there are seven separate non-empty lines,
+    # use those lines as sentences.
+    if len(parts) < 7 and len(lines) == 8:
+        parts = [x.strip() for x in lines[1:] if x.strip()]
 
-    # پشتیبانی بهتر از علائم فارسی و انگلیسی
-    parts = re.split(
-        r"(?<=[.!؟])\s+",
-        body
-    )
-
-    parts = [
-        x.strip()
-        for x in parts
-        if x.strip()
-    ]
+    # If the model returns one paragraph without punctuation, split by lines first.
+    if len(parts) < 7:
+        line_parts = [x.strip() for x in lines[1:] if x.strip()]
+        if len(line_parts) == 7:
+            parts = line_parts
 
     return title, parts
 
@@ -1484,70 +1482,32 @@ def clean_sentence(sentence):
 # ============================================================
 
 FORBIDDEN_OUTPUT_TERMS = [
-    "reviewer",
-    "ai score",
-    "accuracy score",
-    "امتیاز دقت ai",
-    "امتیاز دقت",
-    "اطلاعاتی که reviewer",
-    "هوش مصنوعی بررسی",
-    "متن کامل صفحه",
-    "متن کامل مقاله",
-    "در این صفحه",
-    "مقاله با تیتر دیگری",
-    "تیتر دیگری",
-    "اطلاعات استخراج شده",
-    "fact"
+    "reviewer", "ai score", "accuracy score", "امتیاز دقت ai",
+    "امتیاز دقت", "اطلاعاتی که reviewer", "هوش مصنوعی بررسی",
+    "متن کامل صفحه", "متن کامل مقاله", "در این صفحه",
+    "مقاله با تیتر دیگری", "تیتر دیگری", "اطلاعات استخراج شده", "fact"
 ]
 
 
-def validate_generated_output(
-    generated
-):
-
-    title, sentences = split_sentences(
-        generated
-    )
-
-    if not title:
+def validate_generated_output(generated):
+    title, sentences = split_sentences(generated)
+    if not title or len(sentences) != 7:
         return False, title, sentences
 
-    if len(sentences) != 7:
+    combined = (title + " " + " ".join(sentences)).lower()
+    if any(term.lower() in combined for term in FORBIDDEN_OUTPUT_TERMS):
         return False, title, sentences
 
-    combined = (
-        title
-        + " "
-        + " ".join(sentences)
-    ).lower()
-
-    for term in FORBIDDEN_OUTPUT_TERMS:
-
-        if term.lower() in combined:
-
-            return False, title, sentences
-
-    # ========================================================
-    # تیتر باید فارسی شروع شود
-    # ========================================================
-
-    if not starts_with_persian(
-        title
-    ):
-
+    if not starts_with_persian(title):
         return False, title, sentences
-
-    # ========================================================
-    # تک تک جملات باید فارسی شروع شوند
-    # ========================================================
 
     for sentence in sentences:
-
-        if not starts_with_persian(
-            sentence
-        ):
-
+        if not starts_with_persian(sentence):
             return False, title, sentences
+
+    # Telegram photo captions have a 1024-character limit. Keep a margin for safety.
+    if len(format_post(generated)) > 1024:
+        return False, title, sentences
 
     return True, title, sentences
 
@@ -1674,107 +1634,29 @@ def check_important_fact_coverage(
 # FORMAT POST
 # ============================================================
 
-def format_post(
-    generated,
-    facts=None
-):
+def format_post(generated, facts=None):
+    generated = clean_ai_text(generated)
+    title, sentences = split_sentences(generated)
 
-    generated = clean_ai_text(
-        generated
-    )
-
-    title, sentences = split_sentences(
-        generated
-    )
-
-    sentences = [
-        clean_sentence(x)
-        for x in sentences
-        if clean_sentence(x)
-    ]
-
+    sentences = [clean_sentence(x) for x in sentences if clean_sentence(x)]
     if len(sentences) != 7:
         return ""
 
-    title = clean_sentence(
-        title
-    )
+    title = ensure_persian_start(clean_sentence(title), is_title=True)
+    sentences = [ensure_persian_start(x, is_title=False) for x in sentences]
 
-    # ========================================================
-    # تضمین فارسی بودن شروع تیتر
-    # ========================================================
-
-    title = ensure_persian_start(
-        title,
-        is_title=True
-    )
-
-    # ========================================================
-    # تضمین فارسی بودن شروع هر جمله
-    # ========================================================
-
-    fixed_sentences = []
-
-    for sentence in sentences:
-
-        sentence = ensure_persian_start(
-            sentence,
-            is_title=False
-        )
-
-        fixed_sentences.append(
-            sentence
-        )
-
-    sentences = fixed_sentences
-
-    # ========================================================
-    # بررسی نهایی
-    # ========================================================
-
-    if not starts_with_persian(
-        title
-    ):
+    if not starts_with_persian(title) or any(not starts_with_persian(x) for x in sentences):
         return ""
 
-    for sentence in sentences:
-
-        if not starts_with_persian(
-            sentence
-        ):
-            return ""
-
-    category = detect_category(
-        title
-        + " "
-        + " ".join(sentences)
-    )
-
-    title = (
-        category
-        + " "
-        + title
-    )
-
-    # ========================================================
-    # خبر یک پاراگراف واحد
-    # ========================================================
-
-    body = " ".join(
-        sentences
-    )
+    category = detect_category(title + " " + " ".join(sentences))
+    title = category + " " + title
+    body = " ".join(sentences)
 
     result = (
-        "<b>"
-        + escape_html(title)
-        + "</b>"
-        + "\n\n"
-        + "🟣 "
-        + escape_html(body)
-        + "\n\n"
+        "<b>" + escape_html(title) + "</b>\n\n"
+        + "🟣 " + escape_html(body) + "\n\n"
         + "<b>🆔 @Gamefa_official</b>"
     )
-
     return result
 
 
@@ -2171,18 +2053,139 @@ async def process_news(
         # ====================================================
         # AI GENERATION
         # ====================================================
-        generated = await generate_news(source, facts)
 
-        valid, title, sentences = validate_generated_output(generated)
+        generated = await generate_news(
+            source,
+            facts
+        )
 
-        # اگر AI فرمت را کمی خراب کرد، بدون درخواست دوم آن را محلی اصلاح می‌کنیم.
+        valid, title, sentences = (
+            validate_generated_output(
+                generated
+            )
+        )
+
+        # ====================================================
+        # RETRY 1
+        # ====================================================
+
         if not valid:
-            log.warning("AI output failed validation; repairing locally without another API call.")
-            generated = local_news_fallback(source, facts)
-            valid, title, sentences = validate_generated_output(generated)
+
+            log.warning(
+                "AI output failed validation. Regenerating..."
+            )
+
+            generated = await generate_news(
+                source,
+                facts,
+                retry_instruction=(
+                    "\n\n"
+                    "خروجی قبلی رد شده است.\n"
+                    "این بار دقیقاً این ساختار را رعایت کن:\n\n"
+                    "خط اول = یک تیتر فارسی\n"
+                    "خط دوم = جمله اول\n"
+                    "خط سوم = جمله دوم\n"
+                    "خط چهارم = جمله سوم\n"
+                    "خط پنجم = جمله چهارم\n"
+                    "خط ششم = جمله پنجم\n"
+                    "خط هفتم = جمله ششم\n"
+                    "خط هشتم = جمله هفتم\n\n"
+                    "هیچ جمله‌ای نباید با کلمه انگلیسی شروع شود.\n"
+                    "اگر نام انگلیسی ابتدای جمله است، "
+                    "ابتدا یک عبارت فارسی قرار بده.\n"
+                    "هیچ Reviewer، AI، Fact یا توضیحی درباره فرآیند ننویس."
+                )
+            )
+
+        # ====================================================
+        # FACT COVERAGE
+        # ====================================================
+
+        if not check_important_fact_coverage(
+            generated,
+            facts
+        ):
+
+            log.warning(
+                "Important facts may be missing. Regenerating..."
+            )
+
+            generated = await generate_news(
+                source,
+                facts,
+                retry_instruction=(
+                    "\n\n"
+                    "نسخه قبلی بعضی اطلاعات مهم را از دست داده است.\n"
+                    "تمام Factهای مهم استخراج‌شده را دوباره بررسی کن.\n"
+                    "به‌خصوص تاریخ‌ها، اعداد، پلتفرم‌ها، حجم، قیمت، "
+                    "بازیگران و وضعیت عرضه را در صورت وجود وارد کن.\n"
+                    "خروجی فقط تیتر + 7 جمله باشد.\n"
+                    "تیتر و هر 7 جمله حتماً با فارسی شروع شوند."
+                )
+            )
+
+        # ====================================================
+        # FINAL VALIDATION
+        # ====================================================
+
+        valid, title, sentences = (
+            validate_generated_output(
+                generated
+            )
+        )
 
         if not valid:
-            raise RuntimeError("خروجی خبر قابل اصلاح نیست.")
+
+            # یک بار آخر تلاش برای اصلاح ساختار
+            log.warning(
+                "Final validation failed. Running final repair..."
+            )
+
+            generated = await generate_news(
+                source,
+                facts,
+                retry_instruction=(
+                    "\n\n"
+                    "این آخرین تلاش برای اصلاح خروجی است.\n"
+                    "خروجی باید دقیقاً شامل یک تیتر و 7 جمله باشد.\n"
+                    "تیتر با فارسی شروع شود.\n"
+                    "هر 7 جمله نیز با فارسی شروع شوند.\n"
+                    "هیچ خط اضافه‌ای ننویس.\n"
+                    "هیچ Markdown، Emoji، لینک، Reviewer یا AI Score ننویس.\n"
+                    "نام‌های انگلیسی را فقط بعد از شروع فارسی استفاده کن."
+                )
+            )
+
+            valid, title, sentences = (
+                validate_generated_output(
+                    generated
+                )
+            )
+
+        if not valid:
+
+            title, sentences = split_sentences(generated)
+
+            if len(sentences) >= 5:
+
+                sentences = sentences[:7]
+
+                while len(sentences) < 7:
+                    sentences.append(
+                        "جزئیات بیشتری درباره این خبر منتشر نشده است."
+                    )
+
+                generated = (
+                    title
+                    + "\n"
+                    + "\n".join(sentences)
+                )
+
+            else:
+
+                raise RuntimeError(
+                    "خروجی AI قابل اصلاح نیست."
+                )
 
         # ====================================================
         # FORMAT
@@ -2262,58 +2265,23 @@ async def process_news(
         # ====================================================
 
         if image_path:
-
-            if len(post) <= 1024:
-
-                try:
-
-                    await message.answer_photo(
-                        FSInputFile(
-                            image_path
-                        ),
-                        caption=post,
-                        parse_mode=ParseMode.HTML,
-                        reply_markup=publish_keyboard()
-                    )
-
-                except Exception as error:
-
-                    log.warning(
-                        "Photo preview failed: %s",
-                        error
-                    )
-
-                    await message.answer(
-                        post,
-                        parse_mode=ParseMode.HTML,
-                        reply_markup=publish_keyboard()
-                    )
-
-            else:
-
-                try:
-
-                    await message.answer_photo(
-                        FSInputFile(
-                            image_path
-                        )
-                    )
-
-                except Exception as error:
-
-                    log.warning(
-                        "Image preview failed: %s",
-                        error
-                    )
-
+            # متن و تصویر عمداً در یک پیام ارسال می‌شوند.
+            # post قبل از این مرحله برای محدودیت 1024 کاراکتر کپشن اعتبارسنجی شده است.
+            try:
+                await message.answer_photo(
+                    FSInputFile(image_path),
+                    caption=post,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=publish_keyboard()
+                )
+            except Exception as error:
+                log.warning("Photo preview failed: %s", error)
                 await message.answer(
                     post,
                     parse_mode=ParseMode.HTML,
                     reply_markup=publish_keyboard()
                 )
-
         else:
-
             await message.answer(
                 post,
                 parse_mode=ParseMode.HTML,
@@ -2396,61 +2364,20 @@ async def publish_news(
             and Path(image).exists()
         ):
 
-            if len(text) <= 1024:
-
-                try:
-
-                    await message.bot.send_photo(
-                        CHANNEL_ID,
-                        FSInputFile(
-                            image
-                        ),
-                        caption=text,
-                        parse_mode=ParseMode.HTML
-                    )
-
-                except Exception as error:
-
-                    log.warning(
-                        "Photo publish failed: %s",
-                        error
-                    )
-
-                    await message.bot.send_message(
-                        CHANNEL_ID,
-                        text,
-                        parse_mode=ParseMode.HTML
-                    )
-
-            else:
-
-                try:
-
-                    await message.bot.send_photo(
-                        CHANNEL_ID,
-                        FSInputFile(
-                            image
-                        )
-                    )
-
-                    await message.bot.send_message(
-                        CHANNEL_ID,
-                        text,
-                        parse_mode=ParseMode.HTML
-                    )
-
-                except Exception as error:
-
-                    log.warning(
-                        "Image + text publish failed: %s",
-                        error
-                    )
-
-                    await message.bot.send_message(
-                        CHANNEL_ID,
-                        text,
-                        parse_mode=ParseMode.HTML
-                    )
+            try:
+                await message.bot.send_photo(
+                    CHANNEL_ID,
+                    FSInputFile(image),
+                    caption=text,
+                    parse_mode=ParseMode.HTML
+                )
+            except Exception as error:
+                log.warning("Photo publish failed: %s", error)
+                await message.bot.send_message(
+                    CHANNEL_ID,
+                    text,
+                    parse_mode=ParseMode.HTML
+                )
 
         # ====================================================
         # WITHOUT IMAGE
