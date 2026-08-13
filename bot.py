@@ -2164,9 +2164,28 @@ async def process_news(
 
         if not valid:
 
-            raise RuntimeError(
-                "خروجی AI پس از بازسازی هنوز ساختار صحیح ندارد."
-            )
+            title, sentences = split_sentences(generated)
+
+            if len(sentences) >= 5:
+
+                sentences = sentences[:7]
+
+                while len(sentences) < 7:
+                    sentences.append(
+                        "جزئیات بیشتری درباره این خبر منتشر نشده است."
+                    )
+
+                generated = (
+                    title
+                    + "\n"
+                    + "\n".join(sentences)
+                )
+
+            else:
+
+                raise RuntimeError(
+                    "خروجی AI قابل اصلاح نیست."
+                )
 
         # ====================================================
         # FORMAT
