@@ -50,7 +50,7 @@ from openai import AsyncOpenAI
 # - Railway friendly
 # ============================================================
 
-BOT_VERSION = "v5.3.3"
+BOT_VERSION = "v5.3.4"
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 CHANNEL_ID = os.getenv("CHANNEL_ID", "@Gamefa_official").strip()
@@ -1980,6 +1980,9 @@ async def stats(message: Message):
         if item.get("web_search_used")
     )
 
+    # در هر بار باز شدن آمار، سلامت واقعی هر یک از پنج کلید بررسی می‌شود.
+    key_rows = await key_health_snapshot()
+
     await message.answer(
         "📊 <b>آمار ربات</b>\n\n"
         f"📰 آرشیو: <b>{len(memory)}</b>\n"
@@ -1988,7 +1991,9 @@ async def stats(message: Message):
         f"🔑 کلیدهای OpenAI: <b>{len(OPENAI_KEYS)}</b>\n"
         f"🌐 خبرهای پردازش‌شده با Web Search: <b>{web_count}</b>\n"
         f"🔎 Web Search fallback: "
-        f"<b>{'فعال' if ENABLE_WEB_SEARCH_FALLBACK else 'غیرفعال'}</b>",
+        f"<b>{'فعال' if ENABLE_WEB_SEARCH_FALLBACK else 'غیرفعال'}</b>\n\n"
+        "🔑 <b>سلامت تک‌تک کلیدها (تست واقعی)</b>\n"
+        + "\n".join(key_rows),
         parse_mode=ParseMode.HTML,
         reply_markup=main_keyboard(),
     )
@@ -2435,20 +2440,62 @@ def build_custom_post(title, body, source=None, facts=None):
     )
 
 
-def key_health_snapshot():
-    now = time.time()
-    rows = []
-    for index, key in enumerate(OPENAI_KEYS):
-        cooldown = max(0, int(OPENAI_KEY_COOLDOWN.get(index, 0) - now))
-        if cooldown:
-            status = f"🟡 cooldown {cooldown}s"
+async def check_single_openai_key(key_name, key):
+    """بررسی واقعی یک کلید OpenAI با models.list؛ بدون مصرف توکن مدل."""
+    if not key:
+        return f"{key_name}: ⚪ تنظیم نشده"
+
+    client = None
+    try:
+        client = AsyncOpenAI(api_key=key)
+        await asyncio.wait_for(client.models.list(), timeout=15)
+        return f"{key_name}: 🟢 سالم و قابل استفاده"
+    except asyncio.TimeoutError:
+        return f"{key_name}: 🟡 Timeout / پاسخ نگرفت"
+    except Exception as error:
+        status_code = getattr(error, "status_code", None)
+        text = str(error or "").lower()
+
+        if status_code in (401, 403) or any(x in text for x in (
+            "invalid api key", "incorrect api key", "authentication",
+            "unauthorized", "permission denied", "invalid_api_key",
+        )):
+            return f"{key_name}: 🔴 نامعتبر / بدون دسترسی"
+
+        if status_code == 429 or any(x in text for x in (
+            "rate limit", "rate_limit", "quota", "insufficient_quota",
+            "too many requests", "billing", "credits",
+        )):
+            return f"{key_name}: 🟡 محدودیت / سهمیه یا اعتبار"
+
+        if status_code in (408, 409, 500, 502, 503, 504):
+            return f"{key_name}: 🟡 خطای موقت سرویس ({status_code})"
+
+        short = clean_text(str(error)).replace("\n", " ")[:100]
+        return f"{key_name}: 🔴 خطا — {escape_html(short)}"
+
+
+async def key_health_snapshot():
+    """هر بار که آمار باز می‌شود، هر 5 متغیر numbered را جداگانه تست می‌کند."""
+    tasks = []
+    for number in range(1, 6):
+        env_name = f"OPENAI_API_KEY_{number}"
+        key = os.getenv(env_name, "").strip()
+        tasks.append(check_single_openai_key(f"{number}️⃣ {env_name}", key))
+
+    # همه کلیدها مستقل و همزمان بررسی می‌شوند؛ خرابی یک کلید روی بقیه اثر ندارد.
+    rows = await asyncio.gather(*tasks, return_exceptions=True)
+    normalized = []
+    for number, result in enumerate(rows, 1):
+        if isinstance(result, Exception):
+            normalized.append(f"{number}️⃣ OPENAI_API_KEY_{number}: 🔴 خطای بررسی")
         else:
-            status = "🟢 آماده"
-        rows.append(f"{index + 1}️⃣ {status}")
-    return rows or ["❌ کلیدی تنظیم نشده است"]
+            normalized.append(str(result))
+    return normalized
 
 
-def editorial_dashboard_text():
+async def editorial_dashboard_text():
+    key_rows = await key_health_snapshot()
     return (
         "📊 <b>داشبورد تحریریه v5.3</b>\n\n"
         f"📰 پردازش‌شده: <b>{editorial_stats.get('processed',0)}</b>\n"
@@ -2463,7 +2510,7 @@ def editorial_dashboard_text():
         f"✏️ اصلاحات: <b>{editorial_stats.get('edits',0)}</b>\n"
         f"🔄 بازنویسی: <b>{editorial_stats.get('rewrites',0)}</b>\n"
         f"📥 بیشترین صف: <b>{editorial_stats.get('queue_max',0)}</b>\n\n"
-        "🔑 <b>وضعیت کلیدها</b>\n" + "\n".join(key_health_snapshot())
+        "🔑 <b>وضعیت کلیدها</b>\n" + "\n".join(key_rows)
     )
 
 
@@ -2745,7 +2792,7 @@ async def dashboard_callback(callback):
     if not is_admin_id(callback.from_user.id):
         await callback.answer("⛔ دسترسی ندارید.", show_alert=True); return
     await callback.answer()
-    await callback.message.answer(editorial_dashboard_text(), parse_mode=ParseMode.HTML, reply_markup=main_keyboard())
+    await callback.message.answer(await editorial_dashboard_text(), parse_mode=ParseMode.HTML, reply_markup=main_keyboard())
 
 
 # ============================================================
@@ -2794,13 +2841,13 @@ async def handle_editorial_text(message):
 @router.message(Command("dashboard"))
 async def dashboard_command(message: Message):
     if not is_admin(message): return
-    await message.answer(editorial_dashboard_text(), parse_mode=ParseMode.HTML, reply_markup=main_keyboard())
+    await message.answer(await editorial_dashboard_text(), parse_mode=ParseMode.HTML, reply_markup=main_keyboard())
 
 
 @router.message(Command("keys"))
 async def keys_command(message: Message):
     if not is_admin(message): return
-    await message.answer("🔑 <b>وضعیت کلیدهای OpenAI</b>\n\n" + "\n".join(key_health_snapshot()), parse_mode=ParseMode.HTML)
+    await message.answer("🔑 <b>وضعیت کلیدهای OpenAI</b>\n\n" + "\n".join(await key_health_snapshot()), parse_mode=ParseMode.HTML)
 
 
 @router.message(Command("queue"))
