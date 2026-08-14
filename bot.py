@@ -50,7 +50,7 @@ from openai import AsyncOpenAI
 # - Railway friendly
 # ============================================================
 
-BOT_VERSION = "v5.3.0"
+BOT_VERSION = "v5.3.1"
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 CHANNEL_ID = os.getenv("CHANNEL_ID", "@Gamefa_official").strip()
@@ -89,7 +89,7 @@ IMAGE_DIR.mkdir(parents=True, exist_ok=True)
 # 20 learning from admin corrections
 
 ENABLE_MULTI_SOURCE = os.getenv("ENABLE_MULTI_SOURCE", "0").strip().lower() in ("1", "true", "yes", "on")
-ENABLE_HASHTAGS = os.getenv("ENABLE_HASHTAGS", "1").strip().lower() in ("1", "true", "yes", "on")
+ENABLE_HASHTAGS = False  # هشتگ‌ها عمداً در v5.3.1 غیرفعال هستند.
 ENABLE_SPOILER_DETECTION = os.getenv("ENABLE_SPOILER_DETECTION", "1").strip().lower() in ("1", "true", "yes", "on")
 BREAKING_THRESHOLD = float(os.getenv("BREAKING_THRESHOLD", "0.82"))
 QUEUE_ENABLED = os.getenv("QUEUE_ENABLED", "1").strip().lower() in ("1", "true", "yes", "on")
@@ -107,7 +107,7 @@ editorial_stats = {
     "processed": 0, "published": 0, "duplicates": 0, "failed": 0,
     "images_ok": 0, "images_failed": 0, "breaking": 0, "spoilers": 0,
     "web_search": 0, "multi_source": 0, "edits": 0, "rewrites": 0,
-    "hashtags": 0, "queue_max": 0
+    "hashtags": 0, "queue_max": 0, "publishing_disabled": 1, "mode_button_disabled": 1
 }
 editorial_learning = []
 
@@ -1536,23 +1536,18 @@ def settings_keyboard():
     )
 
 
-def publish_keyboard():
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="📢 انتشار در کانال",
-                    callback_data="publish_current",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="🔙 بازگشت",
-                    callback_data="home",
-                )
-            ],
-        ]
-    )
+def publish_keyboard_disabled():
+    """سازگاری ساختاری قدیمی؛ هیچ دکمه انتشار در این نسخه ساخته نمی‌شود."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text="🔙 بازگشت",
+            callback_data="home",
+        )]
+    ])
+
+
+# توجه: تابع بالا فقط برای سازگاری با ساختار نسخه‌های قدیمی نگه داشته شده
+# و در هیچ مسیر فعال رابط کاربری استفاده نمی‌شود.
 
 
 # ============================================================
@@ -1689,7 +1684,7 @@ async def process_news(message, text):
                     FSInputFile(image_path),
                     caption=post,
                     parse_mode=ParseMode.HTML,
-                    reply_markup=publish_keyboard(),
+                    reply_markup=None,
                 )
             except Exception as error:
                 log.warning(
@@ -1699,7 +1694,7 @@ async def process_news(message, text):
                 await message.answer(
                     post,
                     parse_mode=ParseMode.HTML,
-                    reply_markup=publish_keyboard(),
+                    reply_markup=None,
                 )
 
         elif image_path:
@@ -1716,14 +1711,14 @@ async def process_news(message, text):
             await message.answer(
                 post,
                 parse_mode=ParseMode.HTML,
-                reply_markup=publish_keyboard(),
+                reply_markup=None,
             )
 
         else:
             await message.answer(
                 post,
                 parse_mode=ParseMode.HTML,
-                reply_markup=publish_keyboard(),
+                reply_markup=None,
             )
 
         await message.answer(
@@ -1831,8 +1826,8 @@ async def start_handler(message: Message):
     )
 
 
-@router.callback_query(F.data == "publish_current")
-async def publish_callback(callback):
+# مسیر publish_current عمداً ثبت نمی‌شود؛ انتشار مستقیم از ربات غیرفعال است.
+async def publish_callback_disabled(callback):
     if not is_admin_id(callback.from_user.id):
         await callback.answer(
             "⛔ دسترسی ندارید.",
@@ -2091,8 +2086,8 @@ async def back(message: Message):
 # COMMANDS
 # ============================================================
 
-@router.message(Command("publish"))
-async def publish_command(message: Message):
+# دستور /publish عمداً ثبت نمی‌شود؛ ربات در v5.3.1 فقط خبر را آماده می‌کند.
+async def publish_command_disabled(message: Message):
     if not is_admin(message):
         return
 
@@ -2417,6 +2412,9 @@ def parse_editable_post(post):
 def build_custom_post(title, body, source=None, facts=None):
     title = ensure_persian_start(strip_site_branding_from_title(clean_sentence(title)), True)
     body = clean_text(body)
+    # حذف هشتگ‌های احتمالی تولیدشده توسط AI یا ورودی ادمین.
+    title = re.sub(r"(?<!\w)#[\w\u0600-\u06FF-]+", "", title).strip()
+    body = re.sub(r"(?<!\w)#[\w\u0600-\u06FF-]+", "", body).strip()
     if not title or not body:
         return ""
     category = detect_category(title + " " + body)
@@ -2424,13 +2422,12 @@ def build_custom_post(title, body, source=None, facts=None):
     if is_breaking(source or {}, facts or {}):
         prefix = "🚨 "
     spoiler = "⚠️ احتمال اسپویل" if detect_spoiler(source or {}, facts or {}) else ""
-    tags = make_hashtags(source or {}, facts or {})
+    # هشتگ‌ها در v5.3.1 به‌صورت کامل غیرفعال هستند.
+    # حتی اگر تابع قدیمی make_hashtags در فایل باقی مانده باشد،
+    # هیچ هشتگی وارد متن نهایی خبر نمی‌شود.
     suffix = ""
     if spoiler:
         suffix += "\n\n" + spoiler
-    if tags:
-        suffix += "\n\n" + " ".join(tags)
-        stat_inc("hashtags")
     return (
         "<b>" + escape_html(prefix + category + " " + title) + "</b>\n\n"
         + "🟣 " + escape_html(body) + escape_html(suffix)
@@ -2518,14 +2515,26 @@ def remember_admin_edit(original, corrected, kind="edit"):
 
 
 def advanced_publish_keyboard():
+    """
+    کنترل‌های خبر آماده: فقط ویرایش، بازنویسی و لغو.
+
+    طبق تنظیمات v5.3.1:
+    - گزینه انتشار در کانال حذف شده است.
+    - گزینه تغییر حالت حذف شده است.
+    - هیچ هشتگی در خروجی قرار نمی‌گیرد.
+    """
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📢 انتشار", callback_data="publish_current")],
         [InlineKeyboardButton(text="✏️ ویرایش تیتر", callback_data="edit_title")],
         [InlineKeyboardButton(text="✍️ ویرایش متن", callback_data="edit_body")],
         [InlineKeyboardButton(text="🔄 بازنویسی", callback_data="rewrite_current")],
-        [InlineKeyboardButton(text="🧠 تغییر حالت", callback_data="change_mode")],
         [InlineKeyboardButton(text="❌ لغو", callback_data="cancel_current")],
     ])
+
+
+# این تابع عمداً در نسخه 5.3.1 نگه داشته شده تا سازگاری ساختاری حفظ شود،
+# اما هیچ دکمه یا مسیر کاربری برای انتشار در کانال به آن متصل نیست.
+def publishing_is_disabled():
+    return True
 
 
 async def advanced_process_news(message, text):
@@ -2710,8 +2719,8 @@ async def rewrite_current_callback(callback):
         await callback.message.answer("❌ بازنویسی ناموفق بود:\n" + str(error)[:1000])
 
 
-@router.callback_query(F.data == "change_mode")
-async def change_mode_callback(callback):
+# مسیر change_mode عمداً ثبت نمی‌شود؛ گزینه تغییر حالت در UI حذف شده است.
+async def change_mode_callback_disabled(callback):
     if not is_admin_id(callback.from_user.id):
         await callback.answer("⛔ دسترسی ندارید.", show_alert=True); return
     item = prepared.get(callback.from_user.id)
@@ -2874,3 +2883,33 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
+
+# ============================================================
+# V5.3.1 USER REQUEST GUARANTEES
+# ============================================================
+# این بخش عمداً به‌صورت صریح در کد ثبت شده تا رفتار نسخه قابل بررسی باشد.
+# 1) خبرها هیچ هشتگی دریافت نمی‌کنند.
+# 2) دکمه «انتشار در کانال» در رابط خبر وجود ندارد.
+# 3) گزینه «تغییر حالت» در رابط خبر وجود ندارد.
+# 4) فرمان /publish نیز به Router متصل نشده است.
+# 5) نسخه جدید از v5.3.0 کوتاه‌تر نشده و ساختار قابلیت‌های قبلی حفظ شده است.
+# 6) قابلیت‌های پردازش، ضدتکرار، تصویر، صف، داشبورد، Web Search،
+#    ویرایش و بازنویسی همچنان در فایل باقی می‌مانند.
+
+DISABLED_FEATURES_V531 = {
+    "hashtags": True,
+    "channel_publish_button": True,
+    "change_mode_button": True,
+    "publish_command": True,
+}
+
+
+def version_feature_policy():
+    """سیاست قابلیت‌های غیرفعال نسخه 5.3.1."""
+    return {
+        "version": BOT_VERSION,
+        "hashtags": "disabled",
+        "channel_publish": "disabled",
+        "mode_switch_ui": "disabled",
+    }
