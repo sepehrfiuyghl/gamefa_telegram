@@ -1,4 +1,4 @@
-BOT_VERSION = "v5.1.1"
+BOT_VERSION = "v5.1.2"
 
 import os
 import re
@@ -523,6 +523,23 @@ def make_persian_start(
 # ENSURE PERSIAN START
 # ============================================================
 
+def strip_site_branding_from_title(text):
+    """حذف نام و برند سایت از تیتر نهایی."""
+    if not text:
+        return ""
+    text = str(text).strip()
+    patterns = [
+        r"\s*[|｜]\s*گیمفا\s*$",
+        r"\s*[–—-]\s*گیمفا\s*$",
+        r"^\s*گیمفا\s*[|｜:：-]\s*",
+        r"\s*\(\s*گیمفا\s*\)\s*$",
+    ]
+    for pattern in patterns:
+        text = re.sub(pattern, "", text, flags=re.I)
+    text = re.sub(r"\s+گیمفا\s*$", "", text, flags=re.I)
+    return text.strip(" |｜–—-:：")
+
+
 def ensure_persian_start(
     text,
     is_title=False
@@ -898,6 +915,8 @@ async def fetch_gamefa(url):
             )
         )
 
+    title = strip_site_branding_from_title(title)
+
     # ========================================================
     # DESCRIPTION
     # ========================================================
@@ -1261,7 +1280,7 @@ def local_facts(source):
 
 def local_news_fallback(source, facts):
     """وقتی سهمیه OpenAI تمام شده، ربات متوقف نمی‌شود و همان فرمت ۷ جمله‌ای را می‌سازد."""
-    title = ensure_persian_start(clean_text(source.get("title", "")), True)
+    title = ensure_persian_start(strip_site_branding_from_title(clean_text(source.get("title", ""))), True)
     raw = source.get("body", "") or ""
     parts = re.split(r"(?<=[.!؟])\s+", clean_text(raw))
     parts = [clean_sentence(x) for x in parts if len(clean_sentence(x)) >= 25]
@@ -1278,7 +1297,7 @@ def local_news_fallback(source, facts):
         if key and key not in seen:
             seen.add(key); unique.append(x)
     if not title:
-        title = ensure_persian_start(unique[0] if unique else "خبر جدید گیمفا", True)
+        title = ensure_persian_start(strip_site_branding_from_title(unique[0] if unique else "خبر جدید"), True)
     while len(unique) < 7:
         unique.append("این خبر در ادامه اطلاعات مرتبط با موضوع اصلی را ارائه می‌کند")
     sentences = [ensure_persian_start(x, False) for x in unique[:7]]
@@ -1295,7 +1314,7 @@ def repair_news_output_locally(generated, source, facts):
         if not any(term.lower() in x.lower() for term in FORBIDDEN_OUTPUT_TERMS)
     ]
 
-    title = clean_sentence(lines[0]) if lines else ""
+    title = strip_site_branding_from_title(clean_sentence(lines[0])) if lines else ""
     body_lines = lines[1:] if len(lines) > 1 else []
 
     body = " ".join(body_lines)
@@ -1319,7 +1338,7 @@ def repair_news_output_locally(generated, source, facts):
 
     if not title:
         title = ensure_persian_start(
-            clean_text(source.get("title", "")) or "خبر جدید گیمفا",
+            strip_site_branding_from_title(clean_text(source.get("title", ""))) or "خبر جدید",
             True
         )
 
@@ -1522,19 +1541,17 @@ Supergirl is...
 
 سبک:
 
-فارسی روان و طبیعی.
-
-لحن خبری.
-
-بدون اغراق.
-
-بدون تحلیل شخصی.
-
-بدون نظر شخصی.
-
-بدون ساخت اطلاعات.
+فارسی روان، طبیعی و شبیه متن یک خبرنگار حرفه‌ای بنویس؛ ترجمه تحت‌اللفظی و ماشینی نباشد.
+جمله‌ها را کوتاه، خوش‌خوان و به هم پیوسته بنویس.
+از تکرار عبارت‌هایی مثل «براساس گزارش...» یا «در متن...» در چند جمله پشت سر هم خودداری کن.
+هر جمله باید یک اطلاعات واقعی و مفید داشته باشد و عبارت‌های پرکننده و مصنوعی حذف شوند.
+لحن خبری و حرفه‌ای باشد، اما خشک و ماشینی نباشد.
+بدون اغراق، تحلیل شخصی یا نظر شخصی بنویس.
+هیچ اطلاعاتی را نساز.
 
 نام‌های انگلیسی مهم را حفظ کن، اما هرگز اجازه نده جمله با آن‌ها شروع شود.
+نام سایت «گیمفا» را در تیتر ننویس؛ حتی اگر در عنوان منبع یا صفحه وجود داشته باشد.
+
 
 ---
 
@@ -1891,14 +1908,15 @@ def format_post(
     if len(sentences) != 7:
         return ""
 
-    title = clean_sentence(
+    title = strip_site_branding_from_title(clean_sentence(
         title
-    )
+    ))
 
     # ========================================================
     # تضمین فارسی بودن شروع تیتر
     # ========================================================
 
+    title = strip_site_branding_from_title(title)
     title = ensure_persian_start(
         title,
         is_title=True
@@ -1945,6 +1963,7 @@ def format_post(
         + " ".join(sentences)
     )
 
+    title = strip_site_branding_from_title(title)
     title = (
         category
         + " "
@@ -3289,4 +3308,4 @@ async def main():
 # ============================================================
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    asyncio.run(())
