@@ -8,9 +8,17 @@ import hashlib
 import time
 from pathlib import Path
 from urllib.parse import urlparse, urljoin
+from collections import deque
+from datetime import datetime, timezone
+from urllib.robotparser import RobotFileParser
 
 import aiohttp
 from bs4 import BeautifulSoup
+
+try:
+    from PIL import Image
+except Exception:
+    Image = None
 
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.enums import ParseMode
@@ -42,7 +50,7 @@ from openai import AsyncOpenAI
 # - Railway friendly
 # ============================================================
 
-BOT_VERSION = "v5.2.0"
+BOT_VERSION = "v5.3.0"
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 CHANNEL_ID = os.getenv("CHANNEL_ID", "@Gamefa_official").strip()
@@ -60,6 +68,48 @@ MAX_MEMORY = int(os.getenv("MAX_MEMORY", "1500"))
 MEMORY_FILE = Path(os.getenv("MEMORY_FILE", "news_memory.json"))
 IMAGE_DIR = Path(os.getenv("IMAGE_DIR", "gamefa_images"))
 IMAGE_DIR.mkdir(parents=True, exist_ok=True)
+
+# ============================================================
+# V5.3 ADVANCED EDITORIAL SETTINGS
+# ============================================================
+# ایده‌های 7 تا 20:
+# 7  multi-source research / source discovery
+# 8  breaking news
+# 9  writing modes
+# 10 configurable length
+# 11 automatic hashtags
+# 12 spoiler detection
+# 13 processing queue
+# 14 async-friendly processing
+# 15 editorial dashboard
+# 16 structured logs
+# 17 OpenAI key health
+# 18 manual approval before publishing
+# 19 edit title/body/image/rewrite
+# 20 learning from admin corrections
+
+ENABLE_MULTI_SOURCE = os.getenv("ENABLE_MULTI_SOURCE", "0").strip().lower() in ("1", "true", "yes", "on")
+ENABLE_HASHTAGS = os.getenv("ENABLE_HASHTAGS", "1").strip().lower() in ("1", "true", "yes", "on")
+ENABLE_SPOILER_DETECTION = os.getenv("ENABLE_SPOILER_DETECTION", "1").strip().lower() in ("1", "true", "yes", "on")
+BREAKING_THRESHOLD = float(os.getenv("BREAKING_THRESHOLD", "0.82"))
+QUEUE_ENABLED = os.getenv("QUEUE_ENABLED", "1").strip().lower() in ("1", "true", "yes", "on")
+NEWS_LENGTH = os.getenv("NEWS_LENGTH", "7").strip()
+WRITING_MODE = os.getenv("WRITING_MODE", "standard").strip().lower()
+LEARNING_FILE = Path(os.getenv("LEARNING_FILE", "editorial_learning.json"))
+STATS_FILE = Path(os.getenv("STATS_FILE", "editorial_stats.json"))
+MAX_QUEUE = int(os.getenv("MAX_QUEUE", "20"))
+
+news_queue = deque()
+queue_worker_task = None
+queue_lock = asyncio.Lock()
+queue_waiters = {}
+editorial_stats = {
+    "processed": 0, "published": 0, "duplicates": 0, "failed": 0,
+    "images_ok": 0, "images_failed": 0, "breaking": 0, "spoilers": 0,
+    "web_search": 0, "multi_source": 0, "edits": 0, "rewrites": 0,
+    "hashtags": 0, "queue_max": 0
+}
+editorial_learning = []
 
 try:
     ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
@@ -2114,6 +2164,666 @@ async def text_handler(message: Message):
 
 
 # ============================================================
+# V5.3 ADVANCED EDITORIAL ENGINE
+# ============================================================
+
+ADVANCED_LENGTHS = {
+    "7": 7,
+    "10": 10,
+    "15": 15,
+    "short": 5,
+    "کوتاه": 5,
+    "استاندارد": 7,
+    "بلند": 10,
+}
+
+WRITING_MODES = {
+    "standard": "خبر رسمی و متعادل",
+    "short": "خبر کوتاه و فشرده",
+    "exciting": "خبر پرانرژی اما حرفه‌ای و بدون اغراق",
+}
+
+
+def load_editorial_state():
+    global editorial_learning, editorial_stats
+    try:
+        if LEARNING_FILE.exists():
+            data = json.loads(LEARNING_FILE.read_text(encoding="utf-8"))
+            if isinstance(data, list):
+                editorial_learning = data[-500:]
+    except Exception as error:
+        log.warning("Learning load error: %s", error)
+    try:
+        if STATS_FILE.exists():
+            data = json.loads(STATS_FILE.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                editorial_stats.update(data)
+    except Exception as error:
+        log.warning("Stats load error: %s", error)
+
+
+def save_editorial_state():
+    try:
+        LEARNING_FILE.write_text(json.dumps(editorial_learning[-500:], ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception as error:
+        log.warning("Learning save error: %s", error)
+    try:
+        STATS_FILE.write_text(json.dumps(editorial_stats, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception as error:
+        log.warning("Stats save error: %s", error)
+
+
+def stat_inc(name, amount=1):
+    editorial_stats[name] = int(editorial_stats.get(name, 0)) + amount
+    try:
+        save_editorial_state()
+    except Exception:
+        pass
+
+
+def structured_log(stage, message, **extra):
+    payload = " ".join(f"{k}={v}" for k, v in extra.items())
+    log.info("[%s] %s%s", stage.upper(), message, (" | " + payload) if payload else "")
+
+
+def source_domain(url):
+    try:
+        return urlparse(url).netloc.lower().replace("www.", "")
+    except Exception:
+        return "unknown"
+
+
+def source_quality(source):
+    body_len = len(norm(source.get("body", "")))
+    title_len = len(norm(source.get("title", "")))
+    image_bonus = 0.08 if source.get("image") else 0.0
+    desc_bonus = 0.06 if source.get("description") else 0.0
+    length_score = min(body_len / 5000.0, 1.0) * 0.70
+    title_score = min(title_len / 80.0, 1.0) * 0.16
+    return min(1.0, length_score + title_score + image_bonus + desc_bonus)
+
+
+def is_breaking(source, facts):
+    text = norm(" ".join([
+        source.get("title", ""), source.get("description", ""), source.get("body", "")[:5000],
+        json.dumps(facts, ensure_ascii=False),
+    ]))
+    words = [
+        "breaking", "urgent", "فوری", "لحظاتی پیش", "همین حالا", "رسماً اعلام شد",
+        "تایید شد", "confirmed", "announced today", "just announced", "درگذشت", "مرگ",
+        "تعطیلی", "لغو شد", "cancelled", "cancelled", "delay", "تاخیر بزرگ",
+    ]
+    hits = sum(1 for word in words if word in text)
+    return hits >= 2 or (hits >= 1 and source_quality(source) >= BREAKING_THRESHOLD)
+
+
+def detect_spoiler(source, facts):
+    if not ENABLE_SPOILER_DETECTION:
+        return False
+    text = norm(" ".join([
+        source.get("title", ""), source.get("body", "")[:8000],
+        json.dumps(facts, ensure_ascii=False),
+    ]))
+    spoiler_words = [
+        "spoiler", "اسپویل", "پایان بازی", "پایان فیلم", "قاتل", "مرگ شخصیت",
+        "ending", "finale", "dies", "death of", "secret ending", "plot twist",
+        "twist ending", "داستان بازی", "داستان فیلم",
+    ]
+    return any(x in text for x in spoiler_words)
+
+
+def make_hashtags(source, facts):
+    if not ENABLE_HASHTAGS:
+        return []
+    candidates = []
+    for key in ("people", "companies", "platforms"):
+        value = facts.get(key, []) if isinstance(facts, dict) else []
+        if isinstance(value, list):
+            candidates.extend(str(x) for x in value)
+    title = source.get("title", "")
+    english = re.findall(r"[A-Za-z][A-Za-z0-9_+-]{2,}", title)
+    candidates.extend(english)
+    out = []
+    seen = set()
+    for item in candidates:
+        item = re.sub(r"[^A-Za-z0-9آ-ی]", "", item).strip()
+        if len(item) < 3:
+            continue
+        tag = "#" + item.replace(" ", "")
+        if tag.lower() in seen:
+            continue
+        seen.add(tag.lower())
+        out.append(tag)
+        if len(out) >= 5:
+            break
+    return out
+
+
+async def multi_source_research(source):
+    if not ENABLE_MULTI_SOURCE or not OPENAI_KEYS:
+        return []
+    domain = source_domain(source.get("url", ""))
+    title = source.get("title", "")
+    prompt = f"""
+برای خبر زیر، حداکثر 4 منبع خبری معتبر و مستقل درباره همان رویداد پیدا کن.
+منبع فعلی: {domain}
+عنوان: {title}
+URL: {source.get('url','')}
+فقط منابعی را انتخاب کن که واقعاً درباره همین رویداد هستند.
+خروجی فقط JSON:
+{{"sources":[{{"name":"","url":"","summary":"","confidence":0}}]}}
+"""
+    async def call(client):
+        return await client.responses.create(
+            model=MODEL,
+            instructions="تو دستیار تحقیق تحریریه هستی. اطلاعات را اختراع نکن.",
+            input=prompt,
+            tools=[{"type": "web_search"}],
+            max_output_tokens=1400,
+        )
+    try:
+        response = await openai_failover(call)
+        raw = (response.output_text or "").strip()
+        start, end = raw.find("{"), raw.rfind("}")
+        if start < 0 or end < 0:
+            return []
+        data = json.loads(raw[start:end + 1])
+        sources = data.get("sources", []) if isinstance(data, dict) else []
+        clean = []
+        for item in sources:
+            if not isinstance(item, dict):
+                continue
+            if item.get("url") and item.get("summary"):
+                clean.append({
+                    "name": clean_text(str(item.get("name", "منبع"))),
+                    "url": clean_text(str(item.get("url", ""))),
+                    "summary": clean_text(str(item.get("summary", ""))),
+                    "confidence": float(item.get("confidence", 0) or 0),
+                })
+        if clean:
+            stat_inc("multi_source")
+        return clean[:4]
+    except Exception as error:
+        log.warning("Multi-source research failed: %s", error)
+        return []
+
+
+def build_source_context(source, related):
+    parts = [
+        f"منبع اصلی: {source.get('domain','')}\nعنوان: {source.get('title','')}\nمتن: {source.get('body','')[:AI_SOURCE_LIMIT]}"
+    ]
+    if related:
+        parts.append("منابع مستقل برای راستی‌آزمایی:\n" + "\n".join(
+            f"- {x['name']}: {x['summary']}" for x in related
+        ))
+    return "\n\n".join(parts)
+
+
+def normalize_length(value):
+    value = str(value or "7").strip().lower()
+    return ADVANCED_LENGTHS.get(value, 7)
+
+
+def normalize_mode(value):
+    value = str(value or "standard").strip().lower()
+    return value if value in WRITING_MODES else "standard"
+
+
+def learning_context():
+    if not editorial_learning:
+        return ""
+    recent = editorial_learning[-10:]
+    lines = []
+    for item in recent:
+        if isinstance(item, dict) and item.get("instruction"):
+            lines.append("- " + str(item["instruction"]))
+    return "\n".join(lines)
+
+
+async def rewrite_news_with_settings(source, facts, length=None, mode=None):
+    length = normalize_length(length or NEWS_LENGTH)
+    mode = normalize_mode(mode or WRITING_MODE)
+    context = learning_context()
+    prompt = f"""
+تو سردبیر Gamefa هستی. یک خبر فارسی حرفه‌ای بساز.
+حالت نگارش: {WRITING_MODES[mode]}
+تعداد جمله‌های بدنه: دقیقاً {length}
+تیتر و بدنه باید با فارسی شروع شوند.
+همه واقعیت‌های مهم را حفظ کن و چیزی اختراع نکن.
+نام‌های انگلیسی را حفظ کن اما جمله با نام انگلیسی شروع نشود.
+هیچ Markdown، Emoji، لینک، Reviewer، AI، Fact یا توضیح فرایند تولید نیاور.
+خروجی فقط تیتر در خط اول و سپس یک پاراگراف {length} جمله‌ای باشد.
+"""
+    if context:
+        prompt += "\nنمونه اصلاحات قبلی ادمین برای رعایت سبک:\n" + context
+    input_text = "FACTS:\n" + json.dumps(facts, ensure_ascii=False) + "\n\n" + build_source_context(source, source.get("related_sources", []))
+    response = await openai_failover(lambda client: client.responses.create(
+        model=MODEL, instructions=prompt, input=input_text,
+        max_output_tokens=max(1200, length * 220),
+    ))
+    return (response.output_text or "").strip()
+
+
+def parse_editable_post(post):
+    raw = re.sub(r"<[^>]+>", "", post or "")
+    raw = raw.replace("🟣 ", "")
+    raw = raw.replace("🆔 @Gamefa_official", "").strip()
+    parts = raw.split("\n\n", 1)
+    title = parts[0].strip() if parts else ""
+    body = parts[1].strip() if len(parts) > 1 else ""
+    return title, body
+
+
+def build_custom_post(title, body, source=None, facts=None):
+    title = ensure_persian_start(strip_site_branding_from_title(clean_sentence(title)), True)
+    body = clean_text(body)
+    if not title or not body:
+        return ""
+    category = detect_category(title + " " + body)
+    prefix = ""
+    if is_breaking(source or {}, facts or {}):
+        prefix = "🚨 "
+    spoiler = "⚠️ احتمال اسپویل" if detect_spoiler(source or {}, facts or {}) else ""
+    tags = make_hashtags(source or {}, facts or {})
+    suffix = ""
+    if spoiler:
+        suffix += "\n\n" + spoiler
+    if tags:
+        suffix += "\n\n" + " ".join(tags)
+        stat_inc("hashtags")
+    return (
+        "<b>" + escape_html(prefix + category + " " + title) + "</b>\n\n"
+        + "🟣 " + escape_html(body) + escape_html(suffix)
+        + "\n\n<b>🆔 @Gamefa_official</b>"
+    )
+
+
+def key_health_snapshot():
+    now = time.time()
+    rows = []
+    for index, key in enumerate(OPENAI_KEYS):
+        cooldown = max(0, int(OPENAI_KEY_COOLDOWN.get(index, 0) - now))
+        if cooldown:
+            status = f"🟡 cooldown {cooldown}s"
+        else:
+            status = "🟢 آماده"
+        rows.append(f"{index + 1}️⃣ {status}")
+    return rows or ["❌ کلیدی تنظیم نشده است"]
+
+
+def editorial_dashboard_text():
+    return (
+        "📊 <b>داشبورد تحریریه v5.3</b>\n\n"
+        f"📰 پردازش‌شده: <b>{editorial_stats.get('processed',0)}</b>\n"
+        f"📢 منتشرشده: <b>{editorial_stats.get('published',0)}</b>\n"
+        f"♻️ تکراری: <b>{editorial_stats.get('duplicates',0)}</b>\n"
+        f"❌ ناموفق: <b>{editorial_stats.get('failed',0)}</b>\n"
+        f"🖼 تصویر موفق: <b>{editorial_stats.get('images_ok',0)}</b>\n"
+        f"🚨 Breaking: <b>{editorial_stats.get('breaking',0)}</b>\n"
+        f"⚠️ Spoiler: <b>{editorial_stats.get('spoilers',0)}</b>\n"
+        f"🔎 Web Search: <b>{editorial_stats.get('web_search',0)}</b>\n"
+        f"🌐 چندمنبعی: <b>{editorial_stats.get('multi_source',0)}</b>\n"
+        f"✏️ اصلاحات: <b>{editorial_stats.get('edits',0)}</b>\n"
+        f"🔄 بازنویسی: <b>{editorial_stats.get('rewrites',0)}</b>\n"
+        f"📥 بیشترین صف: <b>{editorial_stats.get('queue_max',0)}</b>\n\n"
+        "🔑 <b>وضعیت کلیدها</b>\n" + "\n".join(key_health_snapshot())
+    )
+
+
+async def smart_image_download(source):
+    """تصویر را دانلود و از نظر اندازه/فرمت بررسی می‌کند."""
+    url = source.get("image", "")
+    if not url:
+        stat_inc("images_failed")
+        return None
+    path = await download_image(url)
+    if not path:
+        stat_inc("images_failed")
+        return None
+    if Image is None:
+        stat_inc("images_ok")
+        return path
+    try:
+        with Image.open(path) as img:
+            width, height = img.size
+            if width < 400 or height < 250:
+                path.unlink(missing_ok=True)
+                stat_inc("images_failed")
+                return None
+        stat_inc("images_ok")
+        return path
+    except Exception:
+        stat_inc("images_ok")
+        return path
+
+
+def remember_admin_edit(original, corrected, kind="edit"):
+    instruction = ""
+    if kind == "title":
+        instruction = "تیتر را با سبک اصلاح‌شده ادمین تولید کن: " + corrected[:250]
+    elif kind == "body":
+        instruction = "لحن و ساختار بدنه را به این سبک نزدیک کن: " + corrected[:400]
+    else:
+        instruction = "اصلاح ادمین: " + corrected[:400]
+    editorial_learning.append({
+        "time": datetime.now(timezone.utc).isoformat(),
+        "kind": kind,
+        "instruction": instruction,
+        "original": original[:500],
+        "corrected": corrected[:500],
+    })
+    editorial_learning[:] = editorial_learning[-500:]
+    stat_inc("edits")
+    save_editorial_state()
+
+
+def advanced_publish_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📢 انتشار", callback_data="publish_current")],
+        [InlineKeyboardButton(text="✏️ ویرایش تیتر", callback_data="edit_title")],
+        [InlineKeyboardButton(text="✍️ ویرایش متن", callback_data="edit_body")],
+        [InlineKeyboardButton(text="🔄 بازنویسی", callback_data="rewrite_current")],
+        [InlineKeyboardButton(text="🧠 تغییر حالت", callback_data="change_mode")],
+        [InlineKeyboardButton(text="❌ لغو", callback_data="cancel_current")],
+    ])
+
+
+async def advanced_process_news(message, text):
+    """نسخه پیشرفته پردازش؛ تابع قبلی عمداً حذف نشده و این تابع جایگزین آن می‌شود."""
+    user_id = message.from_user.id
+    if user_id in processing_users:
+        await message.answer("⏳ یک خبر دیگر در حال پردازش است.")
+        return
+    processing_users.add(user_id)
+    status = None
+    try:
+        url = extract_url(text)
+        if url:
+            status = await message.answer("⏳ در حال دریافت و تحلیل منبع...")
+            structured_log("fetch", "starting", url=url)
+            source = await fetch_article(url)
+            if source.get("web_search_used"):
+                stat_inc("web_search")
+            await status.edit_text("🧠 منبع دریافت شد؛ در حال استخراج واقعیت‌ها...")
+        else:
+            source = {"url":"", "domain":"manual", "title":"", "description":"", "body":text, "image":"", "weak_extraction":False}
+        duplicate_text = source.get("title", "") + "\n" + source.get("body", "")
+        if duplicate(duplicate_text, source.get("title", "")):
+            stat_inc("duplicates")
+            if status:
+                await status.delete()
+            await message.answer("⚠️ این خبر یا یک خبر بسیار مشابه قبلاً در آرشیو وجود دارد.", reply_markup=main_keyboard())
+            return
+        facts = await extract_facts(source)
+        related = await multi_source_research(source)
+        source["related_sources"] = related
+        breaking = is_breaking(source, facts)
+        spoiler = detect_spoiler(source, facts)
+        if breaking:
+            stat_inc("breaking")
+        if spoiler:
+            stat_inc("spoilers")
+        await status.edit_text("✍️ در حال ساخت نسخه تحریریه...") if status else None
+        length = normalize_length(NEWS_LENGTH)
+        mode = normalize_mode(WRITING_MODE)
+        generated = await rewrite_news_with_settings(source, facts, length, mode)
+        title, sentences = split_sentences(generated)
+        if len(sentences) != length or not starts_with_persian(title) or any(not starts_with_persian(x) for x in sentences):
+            generated = local_news_fallback(source, facts)
+            title, sentences = split_sentences(generated)
+            # در حالت پیش‌فرض همیشه 7 جمله داریم؛ اگر طول سفارشی است، تا حد امکان همان تعداد را می‌سازیم.
+            if length != 7:
+                sentences = sentences[:length]
+                while len(sentences) < length:
+                    sentences.append("این گزارش جزئیات بیشتری درباره موضوع اصلی ارائه می‌کند.")
+                generated = title + "\n" + " ".join(sentences)
+        body = " ".join(sentences)
+        post = build_custom_post(title, body, source, facts)
+        if not post:
+            raise RuntimeError("ساخت متن نهایی ناموفق بود.")
+        image_path = await smart_image_download(source)
+        editorial_stats["processed"] = int(editorial_stats.get("processed", 0)) + 1
+        memory.append({
+            "hash": text_hash(duplicate_text), "title": source.get("title", ""),
+            "source": duplicate_text[:25000], "post": post, "url": url or "",
+            "domain": source.get("domain", ""), "breaking": breaking,
+            "spoiler": spoiler, "mode": mode, "length": length,
+            "related_sources": related,
+        })
+        memory[:] = memory[-MAX_MEMORY:]
+        save_memory(); save_editorial_state()
+        prepared[user_id] = {
+            "text": post, "image": str(image_path) if image_path else "",
+            "source": source, "facts": facts, "title": title, "body": body,
+            "mode": mode, "length": length,
+        }
+        if status:
+            try: await status.delete()
+            except Exception: pass
+        if image_path and len(post) <= 1024:
+            await message.answer_photo(FSInputFile(image_path), caption=post, parse_mode=ParseMode.HTML, reply_markup=advanced_publish_keyboard())
+        elif image_path:
+            await message.answer_photo(FSInputFile(image_path))
+            await message.answer(post, parse_mode=ParseMode.HTML, reply_markup=advanced_publish_keyboard())
+        else:
+            await message.answer(post, parse_mode=ParseMode.HTML, reply_markup=advanced_publish_keyboard())
+        await message.answer("✅ خبر آماده است. قبل از انتشار می‌توانی تیتر/متن را ویرایش یا بازنویسی کنی.", reply_markup=main_keyboard())
+    except Exception as error:
+        stat_inc("failed")
+        log.exception("Advanced news processing error")
+        if status:
+            try: await status.delete()
+            except Exception: pass
+        await message.answer("❌ خطا هنگام پردازش خبر:\n\n" + str(error)[:1500], reply_markup=main_keyboard())
+    finally:
+        processing_users.discard(user_id)
+
+
+# تابع اصلی پردازش از اینجا به موتور v5.3 وصل می‌شود.
+process_news = advanced_process_news
+
+
+# ============================================================
+# QUEUE ENGINE
+# ============================================================
+
+async def queue_worker():
+    structured_log("queue", "worker started")
+    while True:
+        try:
+            if not news_queue:
+                await asyncio.sleep(0.4)
+                continue
+            item = news_queue.popleft()
+            user_id = item["user_id"]
+            message = item["message"]
+            text = item["text"]
+            structured_log("queue", "processing", user=user_id, remaining=len(news_queue))
+            await process_news(message, text)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            log.exception("Queue worker error: %s", error)
+            await asyncio.sleep(1)
+
+
+async def enqueue_news(message, text):
+    if not QUEUE_ENABLED:
+        await process_news(message, text)
+        return
+    if len(news_queue) >= MAX_QUEUE:
+        await message.answer("⛔ صف پردازش پر است. کمی بعد دوباره امتحان کن.")
+        return
+    news_queue.append({"user_id": message.from_user.id, "message": message, "text": text, "created": time.time()})
+    editorial_stats["queue_max"] = max(editorial_stats.get("queue_max", 0), len(news_queue))
+    save_editorial_state()
+    await message.answer(f"📥 خبر وارد صف شد. جایگاه فعلی: <b>{len(news_queue)}</b>", parse_mode=ParseMode.HTML)
+
+
+# ============================================================
+# EDITORIAL CALLBACKS
+# ============================================================
+
+@router.callback_query(F.data == "edit_title")
+async def edit_title_callback(callback):
+    if not is_admin_id(callback.from_user.id):
+        await callback.answer("⛔ دسترسی ندارید.", show_alert=True); return
+    item = prepared.get(callback.from_user.id)
+    if not item:
+        await callback.answer("خبر آماده‌ای وجود ندارد.", show_alert=True); return
+    item["awaiting_edit"] = "title"
+    await callback.answer()
+    await callback.message.answer("✏️ تیتر جدید را ارسال کن.")
+
+
+@router.callback_query(F.data == "edit_body")
+async def edit_body_callback(callback):
+    if not is_admin_id(callback.from_user.id):
+        await callback.answer("⛔ دسترسی ندارید.", show_alert=True); return
+    item = prepared.get(callback.from_user.id)
+    if not item:
+        await callback.answer("خبر آماده‌ای وجود ندارد.", show_alert=True); return
+    item["awaiting_edit"] = "body"
+    await callback.answer()
+    await callback.message.answer("✍️ متن کامل یک پاراگرافی جدید را ارسال کن.")
+
+
+@router.callback_query(F.data == "rewrite_current")
+async def rewrite_current_callback(callback):
+    if not is_admin_id(callback.from_user.id):
+        await callback.answer("⛔ دسترسی ندارید.", show_alert=True); return
+    item = prepared.get(callback.from_user.id)
+    if not item:
+        await callback.answer("خبر آماده‌ای وجود ندارد.", show_alert=True); return
+    await callback.answer("در حال بازنویسی...")
+    try:
+        generated = await rewrite_news_with_settings(item["source"], item["facts"], item.get("length", 7), item.get("mode", "standard"))
+        title, sentences = split_sentences(generated)
+        if len(sentences) != item.get("length", 7):
+            await callback.message.answer("⚠️ بازنویسی دقیق نبود؛ دوباره امتحان کن."); return
+        body = " ".join(sentences)
+        post = build_custom_post(title, body, item["source"], item["facts"])
+        item.update({"text": post, "title": title, "body": body})
+        stat_inc("rewrites")
+        await callback.message.answer(post, parse_mode=ParseMode.HTML, reply_markup=advanced_publish_keyboard())
+    except Exception as error:
+        await callback.message.answer("❌ بازنویسی ناموفق بود:\n" + str(error)[:1000])
+
+
+@router.callback_query(F.data == "change_mode")
+async def change_mode_callback(callback):
+    if not is_admin_id(callback.from_user.id):
+        await callback.answer("⛔ دسترسی ندارید.", show_alert=True); return
+    item = prepared.get(callback.from_user.id)
+    if not item:
+        await callback.answer("خبر آماده‌ای وجود ندارد.", show_alert=True); return
+    item["awaiting_mode"] = True
+    await callback.answer()
+    await callback.message.answer("🧠 حالت را ارسال کن: standard / short / exciting")
+
+
+@router.callback_query(F.data == "cancel_current")
+async def cancel_current_callback(callback):
+    if not is_admin_id(callback.from_user.id):
+        await callback.answer("⛔ دسترسی ندارید.", show_alert=True); return
+    prepared.pop(callback.from_user.id, None)
+    await callback.answer("لغو شد.")
+    await callback.message.answer("❌ خبر آماده انتشار لغو شد.", reply_markup=main_keyboard())
+
+
+@router.callback_query(F.data == "dashboard")
+async def dashboard_callback(callback):
+    if not is_admin_id(callback.from_user.id):
+        await callback.answer("⛔ دسترسی ندارید.", show_alert=True); return
+    await callback.answer()
+    await callback.message.answer(editorial_dashboard_text(), parse_mode=ParseMode.HTML, reply_markup=main_keyboard())
+
+
+# ============================================================
+# ADVANCED TEXT CONTROL
+# ============================================================
+
+async def handle_editorial_text(message):
+    if not is_admin(message):
+        return False
+    item = prepared.get(message.from_user.id)
+    if item and item.get("awaiting_edit"):
+        kind = item.pop("awaiting_edit")
+        old = item.get(kind, "")
+        new = (message.text or "").strip()
+        if not new:
+            await message.answer("❌ متن خالی است."); return True
+        if kind == "title":
+            item["title"] = ensure_persian_start(new, True)
+        else:
+            item["body"] = clean_text(new)
+        item["text"] = build_custom_post(item.get("title", ""), item.get("body", ""), item.get("source", {}), item.get("facts", {}))
+        remember_admin_edit(old, new, kind)
+        await message.answer(item["text"], parse_mode=ParseMode.HTML, reply_markup=advanced_publish_keyboard())
+        return True
+    if item and item.get("awaiting_mode"):
+        item.pop("awaiting_mode", None)
+        mode = normalize_mode(message.text)
+        item["mode"] = mode
+        try:
+            generated = await rewrite_news_with_settings(item["source"], item["facts"], item.get("length", 7), mode)
+            title, sentences = split_sentences(generated)
+            if len(sentences) == item.get("length", 7):
+                item["title"] = title; item["body"] = " ".join(sentences)
+                item["text"] = build_custom_post(title, item["body"], item["source"], item["facts"])
+            await message.answer(item["text"], parse_mode=ParseMode.HTML, reply_markup=advanced_publish_keyboard())
+        except Exception as error:
+            await message.answer("❌ تغییر حالت ناموفق بود: " + str(error)[:700])
+        return True
+    return False
+
+
+# ============================================================
+# COMMANDS / MENU EXTENSIONS
+# ============================================================
+
+@router.message(Command("dashboard"))
+async def dashboard_command(message: Message):
+    if not is_admin(message): return
+    await message.answer(editorial_dashboard_text(), parse_mode=ParseMode.HTML, reply_markup=main_keyboard())
+
+
+@router.message(Command("keys"))
+async def keys_command(message: Message):
+    if not is_admin(message): return
+    await message.answer("🔑 <b>وضعیت کلیدهای OpenAI</b>\n\n" + "\n".join(key_health_snapshot()), parse_mode=ParseMode.HTML)
+
+
+@router.message(Command("queue"))
+async def queue_command(message: Message):
+    if not is_admin(message): return
+    await message.answer(f"📥 تعداد اخبار در صف: <b>{len(news_queue)}</b>\nحداکثر: <b>{MAX_QUEUE}</b>", parse_mode=ParseMode.HTML)
+
+
+@router.message(Command("learning"))
+async def learning_command(message: Message):
+    if not is_admin(message): return
+    await message.answer(f"🧠 تعداد اصلاحات یادگرفته‌شده: <b>{len(editorial_learning)}</b>", parse_mode=ParseMode.HTML)
+
+
+# ============================================================
+# PUBLISH STATS WRAPPER
+# ============================================================
+
+_original_publish_news = publish_news
+
+async def publish_news(message, user_id):
+    await _original_publish_news(message, user_id)
+    # فقط در صورت حذف شدن از prepared یعنی انتشار موفق بوده است.
+    if user_id not in prepared:
+        stat_inc("published")
+
+
+# ============================================================
+# END V5.3 ADVANCED ENGINE
+# ============================================================
+
+# ============================================================
 # MAIN
 # ============================================================
 
@@ -2134,6 +2844,10 @@ async def main():
         )
 
     load_memory()
+    load_editorial_state()
+
+    global queue_worker_task
+    queue_worker_task = asyncio.create_task(queue_worker())
 
     bot = Bot(token=BOT_TOKEN)
     dp = Dispatcher()
