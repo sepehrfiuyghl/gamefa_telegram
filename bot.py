@@ -1,4 +1,4 @@
-BOT_VERSION = "v5.1"
+BOT_VERSION = "v5.1.1"
 
 import os
 import re
@@ -1282,8 +1282,63 @@ def local_news_fallback(source, facts):
     while len(unique) < 7:
         unique.append("این خبر در ادامه اطلاعات مرتبط با موضوع اصلی را ارائه می‌کند")
     sentences = [ensure_persian_start(x, False) for x in unique[:7]]
-    return title + "\
-" + " ".join(sentences)
+    return title + "\n" + " ".join(sentences)
+
+def repair_news_output_locally(generated, source, facts):
+    """خروجی AI را تا حد ممکن بدون درخواست API دوم به فرمت ثابت ربات تبدیل می‌کند."""
+    text = clean_ai_text(generated or "")
+    lines = [x.strip() for x in text.replace("\\r", "\\n").splitlines() if x.strip()]
+
+    # حذف خطوط متداول اضافی
+    lines = [
+        x for x in lines
+        if not any(term.lower() in x.lower() for term in FORBIDDEN_OUTPUT_TERMS)
+    ]
+
+    title = clean_sentence(lines[0]) if lines else ""
+    body_lines = lines[1:] if len(lines) > 1 else []
+
+    body = " ".join(body_lines)
+    parts = re.split(r"(?<=[.!؟])\\s+", body)
+    parts = [clean_sentence(x) for x in parts if len(clean_sentence(x)) >= 12]
+
+    # اگر AI جمله‌ها را با خط جدا داده باشد، از همان خطوط نیز استفاده کن.
+    if len(parts) < 7:
+        parts = []
+        for line in body_lines:
+            chunks = re.split(r"(?<=[.!؟])\\s+", line)
+            parts.extend(clean_sentence(x) for x in chunks if clean_sentence(x))
+
+    # اگر هنوز 7 جمله نداریم، از Factها و متن منبع کمک می‌گیریم.
+    if len(parts) < 7:
+        fallback = local_news_fallback(source, facts)
+        ft, fs = split_sentences(fallback)
+        if not title:
+            title = ft
+        parts.extend(fs)
+
+    if not title:
+        title = ensure_persian_start(
+            clean_text(source.get("title", "")) or "خبر جدید گیمفا",
+            True
+        )
+
+    title = ensure_persian_start(title, True)
+
+    unique = []
+    seen = set()
+    for sentence in parts:
+        sentence = ensure_persian_start(sentence, False)
+        key = norm(sentence)
+        if key and key not in seen:
+            seen.add(key)
+            unique.append(sentence)
+
+    while len(unique) < 7:
+        unique.append("این خبر جزئیات بیشتری درباره موضوع اصلی ارائه می‌کند.")
+
+    # اگر بیش از 7 جمله بود، فقط 7 مورد اول را نگه می‌داریم.
+    return title + "\n" + " ".join(unique[:7])
 
 # ============================================================
 # EXTRACT FACTS
@@ -2322,7 +2377,17 @@ async def process_news(
             valid, title, sentences = validate_generated_output(generated)
 
         if not valid:
-            raise RuntimeError("خروجی خبر قابل اصلاح نیست.")
+            log.warning("AI output still invalid; applying stronger local repair.")
+            generated = repair_news_output_locally(generated, source, facts)
+            valid, title, sentences = validate_generated_output(generated)
+
+        if not valid:
+            # آخرین fallback کاملاً محلی؛ نباید به خاطر فرمت AI پردازش خبر متوقف شود.
+            generated = local_news_fallback(source, facts)
+            valid, title, sentences = validate_generated_output(generated)
+
+        if not valid:
+            raise RuntimeError("خروجی خبر حتی با اصلاح محلی قابل تولید نیست.")
 
         # ====================================================
         # FORMAT
