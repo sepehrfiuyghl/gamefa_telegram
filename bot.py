@@ -1,3 +1,5 @@
+BOT_VERSION = "v5.1"
+
 import os
 import re
 import json
@@ -135,6 +137,7 @@ def openai_is_retryable(error):
 
 
 async def openai_failover(call):
+    """اجرای درخواست OpenAI با Failover واقعی بین ۵ کلید."""
     global OPENAI_KEY_INDEX
 
     if not OPENAI_KEYS:
@@ -145,35 +148,46 @@ async def openai_failover(call):
 
     import time
     last_error = None
+    attempted = set()
 
+    # در هر درخواست همه کلیدهای قابل استفاده امتحان می‌شوند.
     for offset in range(len(OPENAI_KEYS)):
         index = (OPENAI_KEY_INDEX + offset) % len(OPENAI_KEYS)
 
+        if index in attempted:
+            continue
+
+        # کلیدی که قبلاً محدود شده فقط وقتی دوباره استفاده شود که cooldown تمام شده باشد.
         if OPENAI_KEY_COOLDOWN.get(index, 0) > time.time():
             continue
 
+        attempted.add(index)
+
         try:
             result = await call(get_openai_client(index))
-            OPENAI_KEY_INDEX = index
+            OPENAI_KEY_INDEX = (index + 1) % len(OPENAI_KEYS)
             OPENAI_KEY_COOLDOWN.pop(index, None)
             return result
+
         except Exception as error:
             last_error = error
+
             if not openai_is_retryable(error):
                 raise
 
             wait = openai_retry_seconds(error)
-            OPENAI_KEY_COOLDOWN[index] = time.time() + min(max(wait, 60), 3600)
+            # cooldown محلی؛ خود ربات منتظر چند ساعت نمی‌ماند.
+            OPENAI_KEY_COOLDOWN[index] = (
+                time.time() + min(max(wait, 30), 1800)
+            )
 
-            logging.warning(
-                "OpenAI key #%s limited; switching to next key.",
+            log.warning(
+                "OpenAI key #%s limited/unavailable; switching to next key.",
                 index + 1
             )
 
     raise RuntimeError(
-        "تمام کلیدهای OpenAI فعلاً محدود یا نامعتبر هستند. "
-        "اگر ۵ کلید متعلق به یک Organization باشند، محدودیت TPM سازمانی "
-        "ممکن است با تعویض کلید نیز باقی بماند."
+        "تمام کلیدهای OpenAI فعلاً محدود یا نامعتبر هستند."
     ) from last_error
 
 
@@ -1109,13 +1123,13 @@ async def fetch_gamefa(url):
 # ============================================================
 
 def get_ai_client():
-
+    """سازگاری با کد قدیمی؛ درخواست‌ها از openai_failover عبور می‌کنند."""
     if not OPENAI_KEYS:
         raise RuntimeError(
-            "OPENAI_API_KEY تنظیم نشده است."
+            "هیچ کلید OpenAI تنظیم نشده است. "
+            "OPENAI_API_KEY_1 تا OPENAI_API_KEY_5 را در Railway تنظیم کن."
         )
-
-    return get_openai_client(0)
+    return OpenAIFailoverProxy(lambda: None)
 
 
 # ============================================================
@@ -1215,19 +1229,25 @@ importance باید عددی بین 1 تا 5 باشد.
 
 
 def is_rate_limit_error(error):
-    text = str(error).lower()
+    text = str(error or "").lower()
+    status = getattr(error, "status_code", None)
     return (
-        "rate_limit_exceeded" in text
+        status == 429
+        or "429" in text
+        or "rate_limit_exceeded" in text
         or "rate limit reached" in text
-        or "error code: 429" in text
-        or "status code 429" in text
+        or "rate limit" in text
+        or "tokens per min" in text
+        or "tpm" in text
+        or "insufficient_quota" in text
+        or "quota" in text
     )
 
 
 def local_facts(source):
     """Fallback بدون API؛ فقط اطلاعات قابل مشاهده از متن را نگه می‌دارد."""
     body = clean_text(source.get("body", ""))
-    sentences = re.split(r"(?<=[.!؟])\\s+", body)
+    sentences = re.split(r"(?<=[.!؟])\s+", body)
     sentences = [x.strip() for x in sentences if len(x.strip()) > 20]
     numbers = re.findall(r"\\d+(?:[.,]\\d+)?(?:\\s*(?:GB|TB|درصد|%))?", body, flags=re.I)
     return {
@@ -1243,7 +1263,7 @@ def local_news_fallback(source, facts):
     """وقتی سهمیه OpenAI تمام شده، ربات متوقف نمی‌شود و همان فرمت ۷ جمله‌ای را می‌سازد."""
     title = ensure_persian_start(clean_text(source.get("title", "")), True)
     raw = source.get("body", "") or ""
-    parts = re.split(r"(?<=[.!؟])\\s+", clean_text(raw))
+    parts = re.split(r"(?<=[.!؟])\s+", clean_text(raw))
     parts = [clean_sentence(x) for x in parts if len(clean_sentence(x)) >= 25]
     fact_parts = []
     for item in facts.get("facts", []) if isinstance(facts, dict) else []:
@@ -1271,18 +1291,19 @@ def local_news_fallback(source, facts):
 
 async def extract_facts(source):
     """استخراج Fact با یک درخواست سبک؛ در صورت 429، پردازش محلی انجام می‌شود."""
-    client = get_ai_client()
     prompt_input = (
         "عنوان مقاله:\n" + source.get("title", "") + "\n\n"
         "توضیحات:\n" + source.get("description", "") + "\n\n"
         "متن مقاله:\n" + source.get("body", "")[:AI_SOURCE_LIMIT]
     )
     try:
-        response = await client.responses.create(
-            model=MODEL,
-            instructions=FACT_PROMPT,
-            input=prompt_input,
-            max_output_tokens=1200
+        response = await openai_failover(
+            lambda client: client.responses.create(
+                model=MODEL,
+                instructions=FACT_PROMPT,
+                input=prompt_input,
+                max_output_tokens=1200
+            )
         )
         raw = (response.output_text or "").strip()
         raw = re.sub(r"^```json\s*", "", raw, flags=re.I)
@@ -1297,8 +1318,8 @@ async def extract_facts(source):
             data = json.loads(raw[start:end + 1])
         return data if isinstance(data, dict) else {}
     except Exception as error:
-        if is_rate_limit_error(error):
-            log.warning("OpenAI rate limit during fact extraction; using local fallback.")
+        if is_rate_limit_error(error) or "تمام کلیدهای OpenAI" in str(error):
+            log.warning("OpenAI unavailable during fact extraction; using local fallback.")
             return local_facts(source)
         raise
 
@@ -1480,7 +1501,7 @@ Supergirl is...
 
 ---
 
-خروجی فقط:
+\n\nخبر باید کوتاه و فشرده باشد تا در صورت وجود تصویر، ترجیحاً داخل محدودیت کپشن تلگرام قرار بگیرد؛ از تکرار و عبارت‌های زائد خودداری کن.\nخروجی فقط:
 
 تیتر
 یک پاراگراف شامل دقیقاً 7 جمله خبری
@@ -1491,7 +1512,6 @@ Supergirl is...
 
 async def generate_news(source, facts, retry_instruction=""):
     """یک درخواست AI سبک برای تولید خبر؛ retryهای زنجیره‌ای حذف شده‌اند."""
-    client = get_ai_client()
     facts_json = json.dumps(facts, ensure_ascii=False, separators=(",", ":"))
     input_text = (
         "FACTS:\n" + facts_json + "\n\n"
@@ -1500,19 +1520,21 @@ async def generate_news(source, facts, retry_instruction=""):
         + retry_instruction
     )
     try:
-        response = await client.responses.create(
-            model=MODEL,
-            instructions=NEWS_PROMPT,
-            input=input_text,
-            max_output_tokens=AI_MAX_OUTPUT_TOKENS
+        response = await openai_failover(
+            lambda client: client.responses.create(
+                model=MODEL,
+                instructions=NEWS_PROMPT,
+                input=input_text,
+                max_output_tokens=AI_MAX_OUTPUT_TOKENS
+            )
         )
         result = (response.output_text or "").strip()
         if not result:
             raise RuntimeError("AI خروجی خالی تولید کرد.")
         return result
     except Exception as error:
-        if is_rate_limit_error(error):
-            log.warning("OpenAI rate limit during news generation; using local fallback.")
+        if is_rate_limit_error(error) or "تمام کلیدهای OpenAI" in str(error):
+            log.warning("OpenAI unavailable during news generation; using local fallback.")
             return local_news_fallback(source, facts)
         raise
 
@@ -2630,7 +2652,8 @@ async def start_handler(
         return
 
     await message.answer(
-        "✨ <b>پنل مدیریت Gamefa</b>\n\n"
+        "✨ <b>پنل مدیریت Gamefa</b>\n"
+        f"نسخه: <b>{BOT_VERSION}</b>\n\n"
         "به پنل مدیریت اخبار خوش آمدید.\n"
         "از منوی زیر عملیات موردنظر را انتخاب کن.",
         parse_mode=ParseMode.HTML,
@@ -3158,7 +3181,12 @@ async def main():
     )
 
     log.info(
-        "Gamefa Bot started successfully."
+        "Gamefa Bot %s started successfully.",
+        BOT_VERSION
+    )
+    log.info(
+        "OpenAI keys configured: %s/5",
+        len(OPENAI_KEYS)
     )
 
     log.info(
