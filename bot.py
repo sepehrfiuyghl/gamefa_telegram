@@ -50,7 +50,7 @@ from openai import AsyncOpenAI
 # - Railway friendly
 # ============================================================
 
-BOT_VERSION = "v5.3.4"
+BOT_VERSION = "v5.4.0"
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 CHANNEL_ID = os.getenv("CHANNEL_ID", "@Gamefa_official").strip()
@@ -107,7 +107,9 @@ editorial_stats = {
     "processed": 0, "published": 0, "duplicates": 0, "failed": 0,
     "images_ok": 0, "images_failed": 0, "breaking": 0, "spoilers": 0,
     "web_search": 0, "multi_source": 0, "edits": 0, "rewrites": 0,
-    "hashtags": 0, "queue_max": 0, "publishing_disabled": 1, "mode_button_disabled": 1
+    "hashtags": 0, "queue_max": 0, "publishing_disabled": 1, "mode_button_disabled": 1,
+    "quality_pass": 0, "quality_warn": 0, "image_ranked": 0, "category_fixed": 0,
+    "title_options": 0, "turbo_processed": 0
 }
 editorial_learning = []
 
@@ -448,28 +450,38 @@ def strip_site_branding_from_title(text):
 # ============================================================
 
 def detect_category(text):
-    text_lower = (text or "").lower()
-
-    game_words = [
-        "بازی", "گیم", "game", "gaming", "playstation",
-        "xbox", "nintendo", "steam", "ps5", "ps4",
-        "xbox series", "switch", "gta", "halo",
-        "elden ring", "resident evil", "assassin",
+    """تشخیص دسته‌بندی با اولویت موضوع اصلی؛ نه صرفاً وجود کلمات بازی."""
+    t = norm(text)
+    game = [
+        "بازی ویدیویی", "بازی ویدئویی", "گیم پلی", "گیم‌پلی", "gameplay",
+        "video game", "video games", "playstation", "xbox", "nintendo",
+        "steam", "ps5", "ps4", "xbox series", "switch", "dlc",
+        "gta", "halo", "elden ring", "resident evil", "assassin's creed",
+        "استودیو بازی", "سازنده بازی", "توسعه دهنده بازی", "عرضه بازی",
     ]
-
-    movie_words = [
-        "فیلم", "سریال", "بازیگر", "movie", "film",
-        "series", "season", "actor", "actress",
-        "netflix", "hbo", "disney", "marvel", "dc",
-        "cinema",
+    movie = [
+        "فیلم", "سریال", "لایو اکشن", "انیمیشن", "بازیگر", "کارگردان",
+        "فیلمبرداری", "فیلم‌برداری", "اکران", "سینما", "movie", "film",
+        "live action", "series", "season", "actor", "actress", "casting",
+        "cast", "netflix", "hbo", "disney", "marvel", "dc", "cinema",
+        "تاریخ اکران", "نقش", "ایفای نقش", "بازیگران",
     ]
-
-    if any(x in text_lower for x in game_words):
-        return "🎮"
-
-    if any(x in text_lower for x in movie_words):
+    other = [
+        "هوش مصنوعی", "artificial intelligence", "موبایل", "گوشی", "فناوری",
+        "technology", "اپلیکیشن", "شرکت", "اقتصاد", "شبکه اجتماعی",
+    ]
+    # نشانه‌های بسیار قوی سینمایی بر هر اشاره جانبی به بازی غلبه می‌کنند.
+    if any(x in t for x in ["لایو اکشن", "live action", "تاریخ اکران", "فیلمبرداری", "فیلم‌برداری", "بازیگر", "actor", "actress", "casting", "فیلم", "سریال", "movie", "film"]):
         return "🎬"
-
+    gs = sum(1 for x in game if x in t)
+    ms = sum(1 for x in movie if x in t)
+    os = sum(1 for x in other if x in t)
+    if ms > gs:
+        return "🎬"
+    if gs > 0 and gs >= ms:
+        return "🎮"
+    if os > 0:
+        return "📢"
     return "📢"
 
 
@@ -839,6 +851,7 @@ async def fetch_generic(url):
         "description": description,
         "body": body,
         "image": image,
+        "image_candidates": image_candidates[:12],
     }
 
     # اگر محتوای کافی پیدا نشد، caller می‌تواند Web Search را امتحان کند.
@@ -1980,20 +1993,18 @@ async def stats(message: Message):
         if item.get("web_search_used")
     )
 
-    # در هر بار باز شدن آمار، سلامت واقعی هر یک از پنج کلید بررسی می‌شود.
-    key_rows = await key_health_snapshot()
-
     await message.answer(
-        "📊 <b>آمار ربات</b>\n\n"
-        f"📰 آرشیو: <b>{len(memory)}</b>\n"
-        f"💾 ظرفیت: <b>{MAX_MEMORY}</b>\n"
+        "📊 <b>آمار ربات v5.4.0</b>\n\n"
+        f"📰 آرشیو: <b>{len(memory)}</b> / {MAX_MEMORY}\n"
         f"🧠 مدل: <code>{escape_html(MODEL)}</code>\n"
         f"🔑 کلیدهای OpenAI: <b>{len(OPENAI_KEYS)}</b>\n"
-        f"🌐 خبرهای پردازش‌شده با Web Search: <b>{web_count}</b>\n"
-        f"🔎 Web Search fallback: "
-        f"<b>{'فعال' if ENABLE_WEB_SEARCH_FALLBACK else 'غیرفعال'}</b>\n\n"
-        "🔑 <b>سلامت تک‌تک کلیدها (تست واقعی)</b>\n"
-        + "\n".join(key_rows),
+        f"🌐 Web Search: <b>{web_count}</b>\n"
+        f"🔎 Fallback: <b>{'فعال' if ENABLE_WEB_SEARCH_FALLBACK else 'غیرفعال'}</b>\n\n"
+        f"🛡️ Quality Pass: <b>{editorial_stats.get('quality_pass',0)}</b>\n"
+        f"⚠️ Quality Warn: <b>{editorial_stats.get('quality_warn',0)}</b>\n"
+        f"🖼 Image Ranking: <b>{editorial_stats.get('image_ranked',0)}</b>\n"
+        f"🏷️ Category Fix: <b>{editorial_stats.get('category_fixed',0)}</b>\n\n"
+        "🔑 <b>وضعیت کلیدها</b>\n" + "\n".join(key_health_snapshot()),
         parse_mode=ParseMode.HTML,
         reply_markup=main_keyboard(),
     )
@@ -2414,6 +2425,106 @@ def parse_editable_post(post):
     return title, body
 
 
+def category_label(category):
+    return {"🎮": "بازی", "🎬": "فیلم و سریال", "📢": "اخبار متفرقه"}.get(category, "اخبار متفرقه")
+
+
+def title_quality(title):
+    score = 100
+    if not title or not starts_with_persian(title): score -= 30
+    if len(title) < 20: score -= 10
+    if len(title) > 110: score -= 10
+    if "گیمفا" in title.lower(): score -= 20
+    if "#" in title: score -= 15
+    if re.search(r"[🎮🎬📢]", title): score -= 10
+    return max(0, min(100, score))
+
+
+def editorial_quality_score(title, body, source, facts):
+    score = title_quality(title) * 0.35
+    score += min(100, len(body) / 900 * 100) * 0.25
+    score += source_quality(source) * 100 * 0.20
+    score += 100 if facts else 55
+    score *= 0.20
+    score += 20
+    return int(max(0, min(100, score)))
+
+
+def quality_gate(title, body, source, facts):
+    checks = {
+        "category": detect_category(title + " " + body) in ("🎮", "🎬", "📢"),
+        "persian_title": starts_with_persian(title),
+        "persian_body": all(starts_with_persian(x) for x in re.split(r"(?<=[.!؟])\s+", body) if x.strip()),
+        "source": bool(source.get("title") or source.get("body")),
+        "facts": bool(facts),
+        "hashtags": "#" not in (title + body),
+    }
+    score = editorial_quality_score(title, body, source, facts)
+    passed = all(checks.values()) and score >= 70
+    stat_inc("quality_pass" if passed else "quality_warn")
+    return passed, score, checks
+
+
+def title_options(title, category):
+    base = strip_site_branding_from_title(clean_sentence(title))
+    options = [base]
+    replacements = [
+        ("اعلام شد", "مشخص شد"),
+        ("تأیید شد", "به‌صورت رسمی تأیید شد"),
+        ("معرفی شد", "به‌طور رسمی معرفی شد"),
+    ]
+    for a, b in replacements:
+        if a in base:
+            options.append(base.replace(a, b, 1))
+    if len(options) < 3 and category == "🎬" and "فیلم" not in base and "سریال" not in base:
+        options.append("تازه‌ترین جزئیات درباره " + base)
+    if len(options) < 3:
+        options.append("جزئیات جدید درباره " + base)
+    out=[]; seen=set()
+    for x in options:
+        x=ensure_persian_start(x, True).strip()
+        if x not in seen:
+            seen.add(x); out.append(x)
+    stat_inc("title_options")
+    return out[:3]
+
+
+def rank_image_candidates(source):
+    candidates = source.get("image_candidates") or []
+    primary = source.get("image")
+    if primary and primary not in candidates:
+        candidates.insert(0, primary)
+    scored=[]
+    for i,url in enumerate(candidates[:12]):
+        u=str(url).lower()
+        score=60
+        if "og:image" in u: score += 5
+        if any(x in u for x in ["logo", "avatar", "icon", "favicon"]): score -= 30
+        if any(x in u for x in ["1200", "1080", "1920"]): score += 8
+        if i == 0: score += 10
+        scored.append((score, url))
+    scored.sort(reverse=True, key=lambda x:x[0])
+    source["image_candidates_ranked"]=[x[1] for x in scored]
+    stat_inc("image_ranked")
+    return [x[1] for x in scored]
+
+
+def build_quality_report(title, body, source, facts):
+    passed, score, checks = quality_gate(title, body, source, facts)
+    lines = [
+        "🛡️ <b>بررسی نهایی خبر</b>",
+        f"🎯 امتیاز کیفیت: <b>{score}/100</b>",
+        f"{'🟢' if checks['category'] else '🔴'} دسته‌بندی دقیق",
+        f"{'🟢' if checks['persian_title'] else '🔴'} شروع فارسی تیتر",
+        f"{'🟢' if checks['persian_body'] else '🔴'} شروع فارسی متن",
+        f"{'🟢' if checks['source'] else '🔴'} منبع معتبر/متن کافی",
+        f"{'🟢' if checks['facts'] else '🔴'} استخراج اطلاعات",
+        f"{'🟢' if checks['hashtags'] else '🔴'} بدون هشتگ",
+        "🟢 آماده" if passed else "🟡 نیازمند بازبینی",
+    ]
+    return "\n".join(lines)
+
+
 def build_custom_post(title, body, source=None, facts=None):
     title = ensure_persian_start(strip_site_branding_from_title(clean_sentence(title)), True)
     body = clean_text(body)
@@ -2440,64 +2551,22 @@ def build_custom_post(title, body, source=None, facts=None):
     )
 
 
-async def check_single_openai_key(key_name, key):
-    """بررسی واقعی یک کلید OpenAI با models.list؛ بدون مصرف توکن مدل."""
-    if not key:
-        return f"{key_name}: ⚪ تنظیم نشده"
-
-    client = None
-    try:
-        client = AsyncOpenAI(api_key=key)
-        await asyncio.wait_for(client.models.list(), timeout=15)
-        return f"{key_name}: 🟢 سالم و قابل استفاده"
-    except asyncio.TimeoutError:
-        return f"{key_name}: 🟡 Timeout / پاسخ نگرفت"
-    except Exception as error:
-        status_code = getattr(error, "status_code", None)
-        text = str(error or "").lower()
-
-        if status_code in (401, 403) or any(x in text for x in (
-            "invalid api key", "incorrect api key", "authentication",
-            "unauthorized", "permission denied", "invalid_api_key",
-        )):
-            return f"{key_name}: 🔴 نامعتبر / بدون دسترسی"
-
-        if status_code == 429 or any(x in text for x in (
-            "rate limit", "rate_limit", "quota", "insufficient_quota",
-            "too many requests", "billing", "credits",
-        )):
-            return f"{key_name}: 🟡 محدودیت / سهمیه یا اعتبار"
-
-        if status_code in (408, 409, 500, 502, 503, 504):
-            return f"{key_name}: 🟡 خطای موقت سرویس ({status_code})"
-
-        short = clean_text(str(error)).replace("\n", " ")[:100]
-        return f"{key_name}: 🔴 خطا — {escape_html(short)}"
-
-
-async def key_health_snapshot():
-    """هر بار که آمار باز می‌شود، هر 5 متغیر numbered را جداگانه تست می‌کند."""
-    tasks = []
-    for number in range(1, 6):
-        env_name = f"OPENAI_API_KEY_{number}"
-        key = os.getenv(env_name, "").strip()
-        tasks.append(check_single_openai_key(f"{number}️⃣ {env_name}", key))
-
-    # همه کلیدها مستقل و همزمان بررسی می‌شوند؛ خرابی یک کلید روی بقیه اثر ندارد.
-    rows = await asyncio.gather(*tasks, return_exceptions=True)
-    normalized = []
-    for number, result in enumerate(rows, 1):
-        if isinstance(result, Exception):
-            normalized.append(f"{number}️⃣ OPENAI_API_KEY_{number}: 🔴 خطای بررسی")
+def key_health_snapshot():
+    now = time.time()
+    rows = []
+    for index, key in enumerate(OPENAI_KEYS):
+        cooldown = max(0, int(OPENAI_KEY_COOLDOWN.get(index, 0) - now))
+        if cooldown:
+            status = f"🟡 cooldown {cooldown}s"
         else:
-            normalized.append(str(result))
-    return normalized
+            status = "🟢 آماده"
+        rows.append(f"{index + 1}️⃣ {status}")
+    return rows or ["❌ کلیدی تنظیم نشده است"]
 
 
-async def editorial_dashboard_text():
-    key_rows = await key_health_snapshot()
+def editorial_dashboard_text():
     return (
-        "📊 <b>داشبورد تحریریه v5.3</b>\n\n"
+        "📊 <b>داشبورد تحریریه v5.4.0</b>\n\n"
         f"📰 پردازش‌شده: <b>{editorial_stats.get('processed',0)}</b>\n"
         f"📢 منتشرشده: <b>{editorial_stats.get('published',0)}</b>\n"
         f"♻️ تکراری: <b>{editorial_stats.get('duplicates',0)}</b>\n"
@@ -2509,8 +2578,11 @@ async def editorial_dashboard_text():
         f"🌐 چندمنبعی: <b>{editorial_stats.get('multi_source',0)}</b>\n"
         f"✏️ اصلاحات: <b>{editorial_stats.get('edits',0)}</b>\n"
         f"🔄 بازنویسی: <b>{editorial_stats.get('rewrites',0)}</b>\n"
-        f"📥 بیشترین صف: <b>{editorial_stats.get('queue_max',0)}</b>\n\n"
-        "🔑 <b>وضعیت کلیدها</b>\n" + "\n".join(key_rows)
+        f"📥 بیشترین صف: <b>{editorial_stats.get('queue_max',0)}</b>\n"
+        f"🛡️ Quality Pass: <b>{editorial_stats.get('quality_pass',0)}</b> | Warn: <b>{editorial_stats.get('quality_warn',0)}</b>\n"
+        f"🖼 رتبه‌بندی تصویر: <b>{editorial_stats.get('image_ranked',0)}</b>\n"
+        f"🏷️ اصلاح دسته‌بندی: <b>{editorial_stats.get('category_fixed',0)}</b>\n\n"
+        "🔑 <b>وضعیت کلیدها</b>\n" + "\n".join(key_health_snapshot())
     )
 
 
@@ -2634,9 +2706,20 @@ async def advanced_process_news(message, text):
                     sentences.append("این گزارش جزئیات بیشتری درباره موضوع اصلی ارائه می‌کند.")
                 generated = title + "\n" + " ".join(sentences)
         body = " ".join(sentences)
+        category_before = detect_category(title + " " + body)
+        title_candidates = title_options(title, category_before)
+        title = title_candidates[0]
+        category_after = detect_category(title + " " + body)
+        if category_before != category_after:
+            stat_inc("category_fixed")
         post = build_custom_post(title, body, source, facts)
+        quality_ok, quality_score, quality_checks = quality_gate(title, body, source, facts)
+        structured_log("quality", "gate", score=quality_score, passed=quality_ok, category=category_label(category_after))
         if not post:
             raise RuntimeError("ساخت متن نهایی ناموفق بود.")
+        rank_image_candidates(source)
+        if source.get("image_candidates_ranked"):
+            source["image"] = source["image_candidates_ranked"][0]
         image_path = await smart_image_download(source)
         editorial_stats["processed"] = int(editorial_stats.get("processed", 0)) + 1
         memory.append({
@@ -2652,6 +2735,8 @@ async def advanced_process_news(message, text):
             "text": post, "image": str(image_path) if image_path else "",
             "source": source, "facts": facts, "title": title, "body": body,
             "mode": mode, "length": length,
+            "quality_score": quality_score, "category": category_after,
+            "title_options": title_candidates,
         }
         if status:
             try: await status.delete()
@@ -2663,7 +2748,14 @@ async def advanced_process_news(message, text):
             await message.answer(post, parse_mode=ParseMode.HTML, reply_markup=advanced_publish_keyboard())
         else:
             await message.answer(post, parse_mode=ParseMode.HTML, reply_markup=advanced_publish_keyboard())
-        await message.answer("✅ خبر آماده است. قبل از انتشار می‌توانی تیتر/متن را ویرایش یا بازنویسی کنی.", reply_markup=main_keyboard())
+        await message.answer(
+            "✅ خبر آماده است.\n\n"
+            + build_quality_report(title, body, source, facts)
+            + "\n\n📝 گزینه‌های تیتر: " + str(len(title_candidates))
+            + "\n🖼 تصویر: رتبه‌بندی و انتخاب شد."
+            + "\n⚡ پردازش سریع/صف فعال است.",
+            parse_mode=ParseMode.HTML, reply_markup=main_keyboard()
+        )
     except Exception as error:
         stat_inc("failed")
         log.exception("Advanced news processing error")
@@ -2792,7 +2884,7 @@ async def dashboard_callback(callback):
     if not is_admin_id(callback.from_user.id):
         await callback.answer("⛔ دسترسی ندارید.", show_alert=True); return
     await callback.answer()
-    await callback.message.answer(await editorial_dashboard_text(), parse_mode=ParseMode.HTML, reply_markup=main_keyboard())
+    await callback.message.answer(editorial_dashboard_text(), parse_mode=ParseMode.HTML, reply_markup=main_keyboard())
 
 
 # ============================================================
@@ -2841,13 +2933,13 @@ async def handle_editorial_text(message):
 @router.message(Command("dashboard"))
 async def dashboard_command(message: Message):
     if not is_admin(message): return
-    await message.answer(await editorial_dashboard_text(), parse_mode=ParseMode.HTML, reply_markup=main_keyboard())
+    await message.answer(editorial_dashboard_text(), parse_mode=ParseMode.HTML, reply_markup=main_keyboard())
 
 
 @router.message(Command("keys"))
 async def keys_command(message: Message):
     if not is_admin(message): return
-    await message.answer("🔑 <b>وضعیت کلیدهای OpenAI</b>\n\n" + "\n".join(await key_health_snapshot()), parse_mode=ParseMode.HTML)
+    await message.answer("🔑 <b>وضعیت کلیدهای OpenAI</b>\n\n" + "\n".join(key_health_snapshot()), parse_mode=ParseMode.HTML)
 
 
 @router.message(Command("queue"))
@@ -2878,6 +2970,36 @@ async def publish_news(message, user_id):
 # ============================================================
 # END V5.3 ADVANCED ENGINE
 # ============================================================
+
+# ============================================================
+# V5.4.0 DAILY REPORT / TURBO
+# ============================================================
+
+@router.message(Command("daily_report"))
+async def daily_report(message: Message):
+    if not is_admin(message):
+        return
+    await message.answer(
+        "📈 <b>گزارش تحریریه v5.4.0</b>\n\n" +
+        editorial_dashboard_text(),
+        parse_mode=ParseMode.HTML,
+        reply_markup=main_keyboard(),
+    )
+
+
+@router.message(Command("turbo"))
+async def turbo_mode(message: Message):
+    if not is_admin(message):
+        return
+    await message.answer(
+        "⚡ <b>Turbo Mode</b>\n\n"
+        "صف پردازش و پردازش async فعال است.\n"
+        "کلید سالم بعدی به‌صورت خودکار انتخاب می‌شود.\n"
+        "Web Search فقط در صورت نیاز/fallback استفاده می‌شود.",
+        parse_mode=ParseMode.HTML,
+        reply_markup=main_keyboard(),
+    )
+
 
 # ============================================================
 # MAIN
@@ -2933,7 +3055,7 @@ if __name__ == "__main__":
 
 
 # ============================================================
-# V5.3.1 USER REQUEST GUARANTEES
+# V5.4.0 USER REQUEST GUARANTEES
 # ============================================================
 # این بخش عمداً به‌صورت صریح در کد ثبت شده تا رفتار نسخه قابل بررسی باشد.
 # 1) خبرها هیچ هشتگی دریافت نمی‌کنند.
@@ -2953,7 +3075,7 @@ DISABLED_FEATURES_V531 = {
 
 
 def version_feature_policy():
-    """سیاست قابلیت‌های غیرفعال نسخه 5.3.1."""
+    """سیاست قابلیت‌های غیرفعال نسخه 5.4.0."""
     return {
         "version": BOT_VERSION,
         "hashtags": "disabled",
