@@ -36,7 +36,7 @@ from openai import AsyncOpenAI
 
 
 # ============================================================
-# GAMEFA BOT v5.6.0
+# GAMEFA BOT v5.8.0
 # ============================================================
 # امکانات:
 # - پشتیبانی از لینک Gamefa و سایت‌های خبری دیگر
@@ -50,14 +50,15 @@ from openai import AsyncOpenAI
 # - Railway friendly
 # ============================================================
 
-BOT_VERSION = "v5.6.0"
+BOT_VERSION = "v5.8.0"
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 CHANNEL_ID = os.getenv("CHANNEL_ID", "@Gamefa_official").strip()
 
 MODEL = os.getenv("OPENAI_MODEL", "gpt-5.4-mini").strip()
 AI_SOURCE_LIMIT = int(os.getenv("AI_SOURCE_LIMIT", "18000"))
-AI_MAX_OUTPUT_TOKENS = int(os.getenv("AI_MAX_OUTPUT_TOKENS", "1400"))
+AI_MAX_OUTPUT_TOKENS = int(os.getenv("AI_MAX_OUTPUT_TOKENS", "1600"))
+V58_POLISH_ENABLED = os.getenv("V58_POLISH_ENABLED", "1").strip().lower() in ("1", "true", "yes", "on")
 
 # اگر 1 باشد، در صورت شکست استخراج معمولی، OpenAI Web Search را امتحان می‌کند.
 ENABLE_WEB_SEARCH_FALLBACK = os.getenv(
@@ -1156,33 +1157,28 @@ async def extract_facts(source):
 # ============================================================
 
 NEWS_PROMPT = """
-تو سردبیر ارشد اخبار فارسی Gamefa هستی.
+تو سردبیر ارشد و ویراستار اخبار فارسی Gamefa هستی.
 
-از Factهای داده‌شده یک خبر فارسی حرفه‌ای تولید کن.
+از FACTهای داده‌شده یک خبر فارسی حرفه‌ای، روان و طبیعی بنویس؛ متن باید شبیه نوشته یک خبرنگار باتجربه حوزه بازی باشد، نه ترجمه ماشینی و نه متن تبلیغاتی.
 
-خروجی دقیقاً:
+خروجی دقیقاً دو بخش دارد:
+خط اول: یک تیتر کوتاه، روشن و خبری.
+خط دوم: یک پاراگراف شامل دقیقاً 7 جمله.
 
-خط اول: تیتر
-
-خط دوم: یک پاراگراف شامل دقیقاً 7 جمله خبری.
-
-هر 7 جمله باید در همان یک پاراگراف باشند.
-
-قوانین:
-- تیتر باید با فارسی شروع شود.
-- هر 7 جمله باید با فارسی شروع شوند.
-- اطلاعات مهم Factها حذف نشوند.
-- هیچ اطلاعاتی اختراع نشود.
-- تاریخ‌ها و اعداد مهم حذف نشوند.
-- نام‌های انگلیسی را حفظ کن.
-- جمله با نام انگلیسی شروع نشود.
-- نام گیمفا در تیتر نیاید.
-- هیچ Markdown استفاده نکن.
-- هیچ Emoji استفاده نکن.
-- هیچ لینک استفاده نکن.
-- هیچ اشاره‌ای به AI، Reviewer، Fact یا فرایند تولید نکن.
-- هیچ تحلیل شخصی نکن.
-- متن طبیعی و خبری باشد.
+اصول نویسندگی:
+- اولویت با روانی، وضوح و انتقال طبیعی اطلاعات است؛ برای پر کردن تعداد جمله‌ها هیچ جمله بی‌ارزش یا تکراری نساز.
+- هر جمله فقط یک ایده اصلی داشته باشد و از جمله‌های بیش از حد طولانی و چندبخشی پرهیز کن.
+- بین جمله‌ها ارتباط منطقی ایجاد کن؛ از تکرار نام بازی، شرکت و یک عبارت ثابت در ابتدای چند جمله پشت سر هم خودداری کن.
+- خبر را از مهم‌ترین نکته شروع کن و سپس جزئیات مرتبط را به ترتیب طبیعی توضیح بده.
+- از فعل‌های طبیعی فارسی و لحن خبری حرفه‌ای استفاده کن؛ از عبارت‌های کلیشه‌ای و ماشینی مانند «در این میان»، «لازم به ذکر است»، «همان‌طور که می‌دانیم»، «حال باید منتظر ماند و دید» و جمله‌های مشابه فقط در صورت ضرورت استفاده کن.
+- از تعریف، هیجان‌سازی، قضاوت شخصی، حدس، پیش‌بینی و نتیجه‌گیری بدون پشتوانه خودداری کن.
+- اطلاعات مهم FACTها، به‌خصوص نام‌ها، اعداد، تاریخ‌ها، پلتفرم‌ها و نقل‌قول‌های واقعی را دقیق حفظ کن.
+- هیچ واقعیت تازه‌ای اضافه نکن و چیزی را که منبع تأیید نکرده قطعی جلوه نده.
+- اگر خبر درباره شایعه یا گزارش غیررسمی است، همان میزان قطعیت را در متن حفظ کن.
+- نام‌های انگلیسی را درست حفظ کن، اما تیتر و جمله‌ها را با واژه یا نام انگلیسی شروع نکن.
+- تیتر کوتاه و غیرکلیک‌بیتی باشد و از تکرار بی‌دلیل نام Gamefa در تیتر خودداری کن.
+- هیچ Markdown، Emoji، هشتگ، لینک یا توضیح درباره AI، Fact، Reviewer یا فرایند تولید ننویس.
+- بدنه باید یک پاراگراف واقعی باشد؛ شکست خط فقط بین تیتر و بدنه باشد.
 
 فقط تیتر و یک پاراگراف 7 جمله‌ای خروجی بده.
 """
@@ -1279,10 +1275,17 @@ def local_news_fallback(source, facts):
             ensure_persian_start(item, False)
         )
 
+    fallback_lines = [
+        "این اطلاعات بر اساس جزئیات منتشرشده در منبع اصلی ارائه شده است.",
+        "جزئیات بیشتر این موضوع در ادامه پوشش خبری مشخص خواهد شد.",
+        "اطلاعات تکمیلی درباره این موضوع در صورت انتشار رسمی قابل بررسی است.",
+    ]
+    i = 0
     while len(unique) < 7:
-        unique.append(
-            "این خبر جزئیات بیشتری درباره موضوع اصلی ارائه می‌کند."
-        )
+        candidate = fallback_lines[i % len(fallback_lines)]
+        if candidate not in unique:
+            unique.append(candidate)
+        i += 1
 
     return title + "\n" + " ".join(unique[:7])
 
@@ -2404,14 +2407,24 @@ async def rewrite_news_with_settings(source, facts, length=None, mode=None):
     mode = normalize_mode(mode or WRITING_MODE)
     context = learning_context()
     prompt = f"""
-تو سردبیر Gamefa هستی. یک خبر فارسی حرفه‌ای بساز.
+تو سردبیر ارشد اخبار فارسی Gamefa هستی و باید متن را مانند یک خبرنگار باتجربه حوزه بازی بنویسی.
 حالت نگارش: {WRITING_MODES[mode]}
 تعداد جمله‌های بدنه: دقیقاً {length}
-تیتر و بدنه باید با فارسی شروع شوند.
-همه واقعیت‌های مهم را حفظ کن و چیزی اختراع نکن.
-نام‌های انگلیسی را حفظ کن اما جمله با نام انگلیسی شروع نشود.
-هیچ Markdown، Emoji، لینک، Reviewer، AI، Fact یا توضیح فرایند تولید نیاور.
-خروجی فقط تیتر در خط اول و سپس یک پاراگراف {length} جمله‌ای باشد.
+
+هدف اصلی: متنی روان، خوانا، طبیعی و حرفه‌ای که خواننده بدون مکث اضافه آن را بفهمد.
+
+قواعد:
+- مهم‌ترین خبر را در ابتدای متن بیاور و سپس جزئیات را با ترتیب منطقی توضیح بده.
+- هر جمله یک ایده اصلی داشته باشد؛ جمله‌های خیلی بلند، تو در تو و ترجمه‌وار ننویس.
+- از تکرار واژه‌ها، نام‌ها و ساختار یکسان در چند جمله متوالی جلوگیری کن.
+- از کلیشه‌های ماشینی، مقدمه‌های بی‌فایده، هیجان‌سازی و جمله‌های پرکننده استفاده نکن.
+- اگر یک نکته قبلاً گفته شده، دوباره با عبارت دیگری تکرارش نکن مگر برای رفع ابهام.
+- همه واقعیت‌های مهم FACTها را دقیق حفظ کن و هیچ اطلاعاتی اختراع نکن.
+- میزان قطعیت خبر را تغییر نده؛ شایعه را قطعی و گزارش را «اعلام رسمی» جلوه نده.
+- نام‌های انگلیسی را حفظ کن اما تیتر و جمله با نام انگلیسی شروع نشود.
+- تیتر کوتاه، دقیق و غیرکلیک‌بیتی باشد.
+- هیچ Markdown، Emoji، لینک، هشتگ، Reviewer، AI، Fact یا توضیح درباره فرایند تولید نیاور.
+- خروجی فقط تیتر در خط اول و سپس یک پاراگراف {length} جمله‌ای باشد.
 """
     if context:
         prompt += "\nنمونه اصلاحات قبلی ادمین برای رعایت سبک:\n" + context
@@ -2474,7 +2487,7 @@ def key_health_snapshot():
 
 def editorial_dashboard_text():
     return (
-        "📊 <b>داشبورد تحریریه v5.6.0</b>\n\n"
+        "📊 <b>داشبورد تحریریه v5.7.0</b>\n\n"
         f"📰 پردازش‌شده: <b>{editorial_stats.get('processed',0)}</b>\n"
         f"📢 منتشرشده: <b>{editorial_stats.get('published',0)}</b>\n"
         f"♻️ تکراری: <b>{editorial_stats.get('duplicates',0)}</b>\n"
@@ -3070,8 +3083,511 @@ def v56_finalize_post(post, source, facts):
     return "<b>" + escape_html(title) + "</b>\n\n🟣 " + escape_html(body) + "\n\n<b>🆔 @Gamefa_official</b>"
 
 # ============================================================
-# END V5.6.0 ADVANCED ENGINE
+# END V5.7.0 PRECISION EDITORIAL ENGINE
 # ============================================================
+
+# ============================================================
+# V5.7.0 PRECISION EDITORIAL ENGINE
+# ============================================================
+# 15 قابلیت اصلی:
+# 1) استخراج واقعیت قبل از نگارش
+# 2) ضد اطلاعات ساختگی
+# 3) درجه اعتبار Claimها
+# 4) pipeline چندمرحله‌ای
+# 5) تطبیق تیتر با متن/منبع
+# 6) تشخیص «رسمی» فقط با شواهد
+# 7) ضد Clickbait
+# 8) قفل اعداد و تاریخ‌ها
+# 9) کنترل Spoiler
+# 10) Fact Memory
+# 11) تشخیص تناقض با آرشیو
+# 12) Confidence Score
+# 13) ویراستار دوم قبل از آماده‌سازی
+# 14) Breaking News با شواهد
+# 15) کنترل نهایی و انتشار فقط در حالت آماده
+# ============================================================
+
+V57_MIN_CONFIDENCE = float(os.getenv("V57_MIN_CONFIDENCE", "0.84"))
+V57_EDITOR_THRESHOLD = float(os.getenv("V57_EDITOR_THRESHOLD", "0.86"))
+V57_MAX_VERIFY_OUTPUT = int(os.getenv("V57_MAX_VERIFY_OUTPUT", "1600"))
+V57_MAX_ARCHIVE_FACTS = int(os.getenv("V57_MAX_ARCHIVE_FACTS", "12"))
+V57_REWRITE_ON_VERIFY_FAIL = os.getenv("V57_REWRITE_ON_VERIFY_FAIL", "1").strip().lower() in ("1", "true", "yes", "on")
+
+V57_OFFICIAL_PATTERNS = [
+    "officially announced", "official announcement", "confirmed by", "official statement",
+    "officially confirmed", "announced by", "تأیید رسمی", "به صورت رسمی", "به‌صورت رسمی",
+    "رسماً اعلام", "رسما اعلام", "تأیید کرد", "اعلام کرد", "تأیید شد", "اعلام شد",
+]
+V57_REPORT_PATTERNS = [
+    "according to reports", "reported by", "reportedly", "sources say", "according to",
+    "گزارش شده", "طبق گزارش", "بر اساس گزارش", "منابع می‌گویند", "احتمال", "گفته می‌شود",
+    "شایعه", "rumor", "rumoured", "may", "could", "expected to",
+]
+V57_CLICKBAIT_TERMS = [
+    "باورنکردنی", "باور نکردنی", "شوک", "شوکه", "عجیب", "جنون", "بمب", "ترکاند",
+    "همه را غافلگیر", "با این خبر همه", "نمی‌توانید باور کنید", "هرگز حدس نمی‌زنید",
+    "باورنکردنی است", "shocking", "insane", "unbelievable", "you won't believe",
+]
+V57_SPOILER_TERMS = [
+    "اسپویل", "spoiler", "مرگ", "کشته می‌شود", "قاتل", "پایان", "فینال", "finale",
+    "ending", "death", "dies", "killed", "secret ending", "هویت واقعی",
+]
+
+
+def v57_numbers(text):
+    text = text or ""
+    return sorted(set(re.findall(r"(?<![A-Za-z])\d+(?:[.,/]\d+)*(?:\s*(?:GB|TB|MB|٪|%|دقیقه|ساعت|سال))?", text, flags=re.I)))
+
+
+def v57_dates(text):
+    text = text or ""
+    patterns = [
+        r"\b\d{1,2}\s+(?:ژانویه|فوریه|مارس|آوریل|مه|ژوئن|ژوئیه|اوت|سپتامبر|اکتبر|نوامبر|دسامبر)\s+\d{4}\b",
+        r"\b(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},?\s+\d{4}\b",
+        r"\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b",
+        r"\b\d{4}[/-]\d{1,2}[/-]\d{1,2}\b",
+    ]
+    out=[]
+    for pattern in patterns:
+        out.extend(re.findall(pattern, text, flags=re.I))
+    return sorted(set(out))
+
+
+def v57_entities(facts):
+    if not isinstance(facts, dict):
+        return []
+    values=[]
+    for key in ("people", "companies", "platforms"):
+        vals=facts.get(key, []) or []
+        if isinstance(vals, list):
+            values.extend(str(x).strip() for x in vals if str(x).strip())
+    return sorted(set(values), key=lambda x: len(x), reverse=True)[:30]
+
+
+def v57_claims(facts):
+    claims=[]
+    for item in (facts or {}).get("facts", []) or []:
+        if isinstance(item, dict):
+            text=clean_sentence(str(item.get("fact", "")))
+            if text:
+                claims.append({
+                    "text": text,
+                    "importance": int(item.get("importance", 3) or 3),
+                    "type": str(item.get("type", "article")),
+                })
+        elif str(item).strip():
+            claims.append({"text": clean_sentence(str(item)), "importance": 3, "type": "article"})
+    return claims[:30]
+
+
+def v57_status(source, facts):
+    blob=" ".join([
+        source.get("title", ""), source.get("description", ""),
+        source.get("body", ""), json.dumps(facts or {}, ensure_ascii=False)
+    ]).lower()
+    if any(x.lower() in blob for x in V57_OFFICIAL_PATTERNS):
+        return "رسمی"
+    if any(x.lower() in blob for x in V57_REPORT_PATTERNS):
+        return "گزارش‌شده/غیرقطعی"
+    return str((facts or {}).get("status", "")).strip() or "نامشخص"
+
+
+def v57_source_evidence(source, facts):
+    body=source.get("body", "") or ""
+    title=source.get("title", "") or ""
+    facts_text=json.dumps(facts or {}, ensure_ascii=False)
+    source_numbers=set(v57_numbers(title+" "+body))
+    fact_numbers=set(v57_numbers(facts_text))
+    source_dates=set(v57_dates(title+" "+body))
+    fact_dates=set(v57_dates(facts_text))
+    number_score=1.0 if not source_numbers else len(source_numbers & fact_numbers)/max(1,len(source_numbers))
+    date_score=1.0 if not source_dates else len(source_dates & fact_dates)/max(1,len(source_dates))
+    claims=v57_claims(facts)
+    covered=sum(1 for c in claims if norm(c["text"]) and norm(c["text"])[:80] in norm(body))
+    claim_score=1.0 if not claims else min(1.0, covered/max(1,min(len(claims),10)))
+    return {"numbers":round(number_score,2),"dates":round(date_score,2),"claims":round(claim_score,2)}
+
+
+def v57_archive_conflicts(source, facts):
+    current_blob=norm(" ".join([
+        source.get("title", ""),
+        str((facts or {}).get("main_event", "")),
+        " ".join(v57_entities(facts)),
+    ]))
+    current_numbers=set(v57_numbers(json.dumps(facts or {}, ensure_ascii=False)))
+    conflicts=[]
+    if not current_blob:
+        return conflicts
+    for item in memory[-MAX_MEMORY:]:
+        if not isinstance(item, dict):
+            continue
+        old_blob=norm(" ".join([str(item.get("title", "")), str(item.get("source", ""))[:2500]]))
+        similarity=word_similarity(current_blob, old_blob)
+        if similarity < 0.55:
+            continue
+        old_numbers=set(v57_numbers(str(item.get("source", ""))))
+        if current_numbers and old_numbers and current_numbers != old_numbers and current_numbers & old_numbers:
+            conflicts.append({
+                "title": str(item.get("title", ""))[:200],
+                "similarity": round(similarity,2),
+                "old_numbers": sorted(old_numbers)[:12],
+                "new_numbers": sorted(current_numbers)[:12],
+            })
+    return conflicts[:5]
+
+
+def v57_clickbait(title):
+    title=title or ""
+    low=norm(title)
+    hits=sum(1 for x in V57_CLICKBAIT_TERMS if norm(x) in low)
+    exclam=title.count("!")+title.count("‼")
+    score=min(1.0, hits*0.2+exclam*0.12)
+    return round(score,2)
+
+
+def v57_breaking(source, facts):
+    blob=" ".join([source.get("title", ""), source.get("description", "")]).lower()
+    strong=("breaking" in blob or "just announced" in blob or "breaking news" in blob)
+    official=v57_status(source,facts)=="رسمی"
+    return bool(strong and (official or source_quality(source)>=0.72))
+
+
+def v57_spoiler_level(source, facts):
+    blob=norm(" ".join([source.get("title", ""),source.get("description", ""),source.get("body", ""),json.dumps(facts or {},ensure_ascii=False)]))
+    hits=sum(1 for x in V57_SPOILER_TERMS if norm(x) in blob)
+    if hits>=3: return "شدید"
+    if hits>=1: return "احتمالی"
+    return "بدون اسپویل"
+
+
+def v57_title_body_match(title, body, source):
+    title_words=set(norm(title).split())
+    body_words=set(norm(body).split())
+    if not title_words or not body_words:
+        return 0.0
+    overlap=len(title_words & body_words)/max(1,len(title_words))
+    source_words=set(norm((source.get("title","")+" "+source.get("description", ""))).split())
+    source_overlap=len(title_words & source_words)/max(1,len(title_words)) if source_words else 0.0
+    return round(min(1.0, overlap*0.65+source_overlap*0.35),2)
+
+
+def v57_build_audit(source, facts, draft_title, draft_body, related=None):
+    related=related or []
+    evidence=v57_source_evidence(source,facts)
+    status=v57_status(source,facts)
+    conflicts=v57_archive_conflicts(source,facts)
+    clickbait=v57_clickbait(draft_title)
+    title_match=v57_title_body_match(draft_title,draft_body,source)
+    spoiler=v57_spoiler_level(source,facts)
+    quality=source_quality(source)
+    multi=min(1.0,len(related)/2.0)
+    official_bonus=0.06 if status=="رسمی" else 0.0
+    conflict_penalty=min(0.25,len(conflicts)*0.08)
+    confidence=max(0.0,min(1.0,
+        quality*0.28 + evidence["numbers"]*0.15 + evidence["dates"]*0.12 +
+        evidence["claims"]*0.16 + title_match*0.10 + multi*0.08 + official_bonus +
+        (0.05 if clickbait<0.15 else 0.0) - conflict_penalty
+    ))
+    return {
+        "confidence":round(confidence,2),
+        "source_quality":round(quality,2),
+        "status":status,
+        "numbers_ok":evidence["numbers"]>=0.85,
+        "dates_ok":evidence["dates"]>=0.85,
+        "claim_coverage":evidence["claims"],
+        "title_match":title_match,
+        "clickbait":clickbait,
+        "spoiler":spoiler,
+        "breaking":v57_breaking(source,facts),
+        "archive_conflicts":conflicts,
+        "related_sources":len(related),
+        "category":detect_category(draft_title+" "+draft_body,facts),
+    }
+
+
+V57_VERIFY_PROMPT="""
+تو ویراستار نهایی و راستی‌آزمای تحریریه Gamefa هستی.
+وظیفه تو فقط بررسی پیش‌نویس در برابر منبع و FACTS است؛ چیزی را حدس نزن.
+
+قوانین:
+1) هر ادعای مهم باید در منبع/FACTS پشتیبانی شود.
+2) «رسمی/تأیید شد» فقط در صورت وجود شاهد صریح مجاز است.
+3) اعداد و تاریخ‌ها باید با منبع سازگار باشند.
+4) تیتر باید دقیقاً همان رویداد را بگوید و Clickbait نباشد.
+5) نام اشخاص/شرکت‌ها/بازی‌ها/فیلم‌ها نباید تغییر کند.
+6) اگر جمله‌ای اطلاعات تازه و بدون پشتوانه دارد، hallucination=true.
+7) اگر اشکال وجود دارد، نسخه اصلاح‌شده کوتاه از تیتر و بدنه را پیشنهاد بده؛ اطلاعات جدید اضافه نکن.
+8) خروجی فقط JSON معتبر با کلیدهای زیر باشد:
+{"pass":true,"score":0.0,"hallucination":false,"official_claim_ok":true,"numbers_ok":true,"dates_ok":true,"title_ok":true,"clickbait":0.0,"spoiler":"بدون اسپویل","issues":[],"corrected_title":"","corrected_body":""}
+"""
+
+
+async def v57_verify_draft(source, facts, title, body, related=None):
+    audit=v57_build_audit(source,facts,title,body,related)
+    input_text=(
+        "منبع:\n"+source.get("domain","")+"\nعنوان اصلی:\n"+source.get("title","")+
+        "\nمتن منبع:\n"+source.get("body","")[:AI_SOURCE_LIMIT]+
+        "\n\nFACTS:\n"+json.dumps(facts or {},ensure_ascii=False)+
+        "\n\nپیش‌نویس تیتر:\n"+title+"\n\nپیش‌نویس متن:\n"+body+
+        "\n\nمنابع مرتبط:\n"+json.dumps(related or [],ensure_ascii=False)[:7000]+
+        "\n\nممیزی محلی:\n"+json.dumps(audit,ensure_ascii=False)
+    )
+    try:
+        response=await openai_failover(lambda client: client.responses.create(
+            model=MODEL,instructions=V57_VERIFY_PROMPT,input=input_text,max_output_tokens=V57_MAX_VERIFY_OUTPUT
+        ))
+        raw=(response.output_text or "").strip()
+        start,end=raw.find("{"),raw.rfind("}")
+        if start<0 or end<0:
+            raise ValueError("JSON ویراستار نهایی نامعتبر است")
+        data=json.loads(raw[start:end+1])
+        if not isinstance(data,dict):
+            raise ValueError("خروجی ویراستار دیکشنری نیست")
+        for key,default in (("pass",False),("score",0.0),("hallucination",True),("official_claim_ok",False),("numbers_ok",False),("dates_ok",False),("title_ok",False),("clickbait",audit["clickbait"]),("spoiler",audit["spoiler"]),("issues",[]),("corrected_title",""),("corrected_body","")):
+            data.setdefault(key,default)
+        data["local_audit"]=audit
+        data["score"]=max(0.0,min(1.0,float(data.get("score",0) or 0)))
+        data["pass"]=bool(data.get("pass")) and not bool(data.get("hallucination"))
+        return data
+    except Exception as error:
+        log.warning("V5.7 verification failed: %s",error)
+        # در صورت قطعی نبودن سرویس، ممیزی محلی محافظه‌کارانه عمل می‌کند.
+        safe=(audit["confidence"]>=V57_EDITOR_THRESHOLD and audit["numbers_ok"] and audit["dates_ok"] and audit["clickbait"]<0.35 and not audit["archive_conflicts"])
+        return {
+            "pass":safe,"score":audit["confidence"],"hallucination":not safe,
+            "official_claim_ok":audit["status"]!="نامشخص","numbers_ok":audit["numbers_ok"],
+            "dates_ok":audit["dates_ok"],"title_ok":audit["title_match"]>=0.35,
+            "clickbait":audit["clickbait"],"spoiler":audit["spoiler"],
+            "issues":["ویراستار دوم در دسترس نبود؛ ممیزی محلی اعمال شد."],
+            "corrected_title":"","corrected_body":"","local_audit":audit
+        }
+
+
+def v57_normalize_corrected(corrected_title, corrected_body, source, facts, length):
+    title=strip_site_branding_from_title(clean_sentence(corrected_title or ""))
+    body=clean_text(corrected_body or "")
+    if not title or not body:
+        return ""
+    title=ensure_persian_start(title,True)
+    sentences=split_sentences(title+"\n"+body)[1]
+    if len(sentences)!=length:
+        return ""
+    sentences=[ensure_persian_start(clean_sentence(x),False) for x in sentences]
+    return title+"\n"+" ".join(sentences)
+
+
+def v57_quality_panel(audit, verify):
+    score=int(round(max(float(audit.get("confidence",0)),float(verify.get("score",0)))*100))
+    status="✅ آماده" if verify.get("pass") and score>=int(V57_MIN_CONFIDENCE*100) else "⚠️ نیازمند بررسی"
+    conflicts=len(audit.get("archive_conflicts",[]) or [])
+    return (
+        "\n\n━━━━━━━━━━━━━━━━━━\n"
+        "🧠 <b>ارزیابی هوشمند v5.7</b>\n"
+        f"🎯 دقت محتوا: <b>{score}/100</b>\n"
+        f"📰 اعتبار منبع: <b>{int(audit.get('source_quality',0)*100)}/100</b>\n"
+        f"📅 اعداد/تاریخ: <b>{'✅' if audit.get('numbers_ok') and audit.get('dates_ok') else '⚠️'}</b>\n"
+        f"🏷 وضعیت خبر: <b>{escape_html(str(audit.get('status','نامشخص')))}</b>\n"
+        f"🎯 تیتر: <b>{'✅' if verify.get('title_ok') else '⚠️'}</b>\n"
+        f"🚫 Clickbait: <b>{int(float(audit.get('clickbait',0))*100)}/100</b>\n"
+        f"⚠️ Spoiler: <b>{escape_html(str(audit.get('spoiler','بدون اسپویل')))}</b>\n"
+        f"♻️ تناقض آرشیو: <b>{conflicts}</b>\n"
+        f"🌐 منابع مرتبط: <b>{audit.get('related_sources',0)}</b>\n"
+        f"\n{status}\n"
+        "━━━━━━━━━━━━━━━━━━"
+    )
+
+
+V58_POLISH_PROMPT = """
+تو ویراستار نهایی تحریریه Gamefa هستی.
+پیش‌نویس زیر از قبل از نظر واقعیت بررسی شده است. وظیفه تو فقط بهتر کردن زبان و خوانایی آن است.
+
+قوانین بسیار مهم:
+- هیچ واقعیت، عدد، تاریخ، نام، پلتفرم یا ادعای تازه‌ای اضافه نکن.
+- هیچ واقعیتی را حذف نکن مگر اینکه کاملاً تکراری یا صرفاً پرکننده باشد؛ اگر حذف اطلاعات باعث از دست رفتن یک Fact مهم می‌شود، آن را نگه دار.
+- میزان قطعیت خبر را تغییر نده.
+- تیتر را کوتاه، دقیق و غیرکلیک‌بیتی نگه دار.
+- جمله‌ها را طبیعی و فارسی بنویس؛ ساختار ترجمه ماشینی نداشته باش.
+- جمله‌های طولانی را در صورت امکان روان‌تر کن، اما تعداد جمله‌ها را تغییر نده.
+- از تکرار نام بازی یا شرکت در ابتدای جمله‌های متوالی پرهیز کن.
+- از عبارت‌های کلیشه‌ای و بی‌فایده مثل «لازم به ذکر است»، «در این میان»، «همان‌طور که می‌دانیم» و «حال باید منتظر ماند و دید» استفاده نکن.
+- هیچ تحلیل، نظر شخصی، تبلیغ، نتیجه‌گیری ساختگی، Emoji، Markdown، هشتگ یا لینک اضافه نکن.
+- خروجی فقط تیتر و سپس همان تعداد جمله در یک پاراگراف باشد.
+"""
+
+async def v58_polish_news(source, facts, title, body, length):
+    if not V58_POLISH_ENABLED or not title or not body:
+        return title + "\n" + body
+    input_text = (
+        "FACTS:\n" + json.dumps(facts or {}, ensure_ascii=False) +
+        "\n\nمنبع اصلی:\n" + source.get("body", "")[:AI_SOURCE_LIMIT] +
+        "\n\nپیش‌نویس:\n" + title + "\n" + body
+    )
+    try:
+        response = await openai_failover(lambda client: client.responses.create(
+            model=MODEL,
+            instructions=V58_POLISH_PROMPT + f"\nتعداد جمله‌های بدنه باید دقیقاً {length} باشد.",
+            input=input_text,
+            max_output_tokens=max(1000, length * 210),
+        ))
+        polished = (response.output_text or "").strip()
+        pt, ps = split_sentences(polished)
+        if (
+            not pt or len(ps) != length or
+            not starts_with_persian(pt) or
+            any(not starts_with_persian(x) for x in ps)
+        ):
+            return title + "\n" + body
+        return pt + "\n" + " ".join(ps)
+    except Exception as error:
+        log.warning("V5.8 readability polish failed: %s", error)
+        return title + "\n" + body
+
+
+async def v57_process_news(message, text):
+    user_id=message.from_user.id
+    if user_id in processing_users:
+        await message.answer("⏳ یک خبر دیگر در حال پردازش است.")
+        return
+    processing_users.add(user_id)
+    status=None
+    try:
+        url=extract_url(text)
+        if url:
+            status=await message.answer("⏳ مرحله ۱/۶ — دریافت و پاک‌سازی منبع...")
+            source=await fetch_article(url)
+            if source.get("web_search_used"): stat_inc("web_search")
+        else:
+            source={"url":"","domain":"manual","title":"","description":"","body":text,"image":"","weak_extraction":False}
+        duplicate_text=source.get("title","")+"\n"+source.get("body","")
+        if duplicate(duplicate_text,source.get("title","")):
+            stat_inc("duplicates")
+            if status:
+                try: await status.delete()
+                except Exception: pass
+            await message.answer("⚠️ این خبر یا یک خبر بسیار مشابه قبلاً در آرشیو وجود دارد.",reply_markup=main_keyboard())
+            return
+        if status: await status.edit_text("🧠 مرحله ۲/۶ — استخراج واقعیت‌های قابل استناد...")
+        facts=await extract_facts(source)
+        # Fact Memory: خلاصه‌ای از واقعیت‌های مهم در رکورد آرشیو ذخیره می‌شود.
+        facts["v57_memory"]={
+            "claims":v57_claims(facts)[:V57_MAX_ARCHIVE_FACTS],
+            "numbers":v57_numbers(source.get("body","")[:AI_SOURCE_LIMIT]),
+            "dates":v57_dates(source.get("body","")[:AI_SOURCE_LIMIT]),
+            "entities":v57_entities(facts),
+            "status":v57_status(source,facts),
+        }
+        if status: await status.edit_text("🌐 مرحله ۳/۶ — بررسی منابع مرتبط و تناقض‌های آرشیو...")
+        related=await multi_source_research(source)
+        source["related_sources"]=related
+        conflicts=v57_archive_conflicts(source,facts)
+        if status: await status.edit_text("✍️ مرحله ۴/۶ — نگارش خبر بدون افزودن اطلاعات جدید...")
+        length=normalize_length(NEWS_LENGTH)
+        mode=normalize_mode(WRITING_MODE)
+        generated=await rewrite_news_with_settings(source,facts,length,mode)
+        title,sentences=split_sentences(generated)
+        if len(sentences)!=length or not starts_with_persian(title) or any(not starts_with_persian(x) for x in sentences):
+            generated=local_news_fallback(source,facts)
+            title,sentences=split_sentences(generated)
+            sentences=sentences[:length]
+            while len(sentences)<length:
+                sentences.append("این گزارش جزئیات بیشتری درباره موضوع اصلی ارائه می‌کند.")
+            generated=title+"\n"+" ".join(sentences)
+        body=" ".join(sentences)
+        # V5.8: ویراستاری زبانی جدا از راستی‌آزمایی؛ فقط خوانایی را بهتر می‌کند.
+        if V58_POLISH_ENABLED:
+            polished = await v58_polish_news(source, facts, title, body, length)
+            pt, ps = split_sentences(polished)
+            if len(ps) == length and starts_with_persian(pt) and all(starts_with_persian(x) for x in ps):
+                title, body = pt, " ".join(ps)
+        if status: await status.edit_text("🔎 مرحله ۵/۶ — ویراستار دوم و راستی‌آزمایی نهایی...")
+        verify=await v57_verify_draft(source,facts,title,body,related)
+        # اگر ویراستار ایراد جدی پیدا کرد، فقط یک بار با ایرادهای مشخص بازنویسی می‌کنیم.
+        if (not verify.get("pass") or float(verify.get("score",0))<V57_EDITOR_THRESHOLD) and V57_REWRITE_ON_VERIFY_FAIL:
+            issues=verify.get("issues",[])
+            correction_prompt=(
+                "خبر زیر را فقط بر اساس FACTS اصلاح کن. هیچ واقعیت جدیدی اضافه نکن. "
+                "اشکالات ویراستار را برطرف کن. تیتر و سپس دقیقاً %d جمله در یک پاراگراف بده. "
+                "تیتر و هر جمله با فارسی شروع شود. هشتگ، ایموجی، لینک و تحلیل شخصی ممنوع.\n"
+                "اشکالات: %s\n" % (length,json.dumps(issues,ensure_ascii=False))
+            )
+            try:
+                response=await openai_failover(lambda client: client.responses.create(
+                    model=MODEL,instructions=correction_prompt,
+                    input="FACTS:\n"+json.dumps(facts,ensure_ascii=False)+"\n\nDRAFT:\n"+title+"\n"+body,
+                    max_output_tokens=max(1200,length*220)
+                ))
+                corrected=(response.output_text or "").strip()
+                ct,cs=split_sentences(corrected)
+                if len(cs)==length:
+                    title,body=ct," ".join(cs)
+                    verify=await v57_verify_draft(source,facts,title,body,related)
+            except Exception as error:
+                log.warning("V5.7 corrective rewrite failed: %s",error)
+        audit=verify.get("local_audit") or v57_build_audit(source,facts,title,body,related)
+        # قفل قطعی اعداد: اگر متن نهایی عددی از منبع دارد که در FACTS نیست، بازنویسی اجباری/رد.
+        source_numbers=set(v57_numbers(source.get("title","")+" "+source.get("body","")))
+        draft_numbers=set(v57_numbers(title+" "+body))
+        if source_numbers and not source_numbers.issubset(draft_numbers | set(v57_numbers(json.dumps(facts,ensure_ascii=False)))):
+            verify["pass"]=False
+            verify.setdefault("issues",[]).append("برخی اعداد مهم منبع در خروجی پوشش داده نشده‌اند.")
+        if v57_clickbait(title)>=0.45:
+            verify["pass"]=False
+            verify.setdefault("issues",[]).append("تیتر Clickbait تشخیص داده شد.")
+        if v57_status(source,facts)=="نامشخص" and any(x in norm(title) for x in [norm("رسمی"),norm("تأیید شد"),norm("اعلام شد")]):
+            verify["pass"]=False
+            verify.setdefault("issues",[]).append("ادعای رسمی بدون شاهد کافی است.")
+        post=build_custom_post(title,body,source,facts)
+        post=v56_finalize_post(post,source,facts)
+        if not post:
+            raise RuntimeError("ساخت متن نهایی ناموفق بود.")
+        image_path=await smart_image_download(source)
+        final_conf=float(verify.get("score",0) or 0)
+        ready=bool(verify.get("pass")) and final_conf>=V57_MIN_CONFIDENCE and not conflicts
+        editorial_stats["processed"]=int(editorial_stats.get("processed",0))+1
+        memory.append({
+            "hash":text_hash(duplicate_text),"title":source.get("title","")[:500],
+            "source":duplicate_text[:25000],"post":post,"url":url or "",
+            "domain":source.get("domain",""),"breaking":bool(audit.get("breaking")),
+            "spoiler":audit.get("spoiler"),"mode":mode,"length":length,
+            "related_sources":related,"quality":audit,"v57_verify":verify,
+            "facts_memory":facts.get("v57_memory",{}),"created_at":int(time.time()),
+        })
+        memory[:]=memory[-MAX_MEMORY:]
+        save_memory();save_editorial_state()
+        prepared[user_id]={
+            "text":post,"image":str(image_path) if image_path else "","source":source,"facts":facts,
+            "title":title,"body":body,"mode":mode,"length":length,"quality":audit,
+            "v57_verify":verify,"ready":ready,
+        }
+        if status:
+            try: await status.delete()
+            except Exception: pass
+        # خبر کم‌اطمینان منتشر نمی‌شود؛ فقط برای بررسی ادمین نمایش داده می‌شود.
+        if image_path and len(post)<=1024:
+            await message.answer_photo(FSInputFile(image_path),caption=post,parse_mode=ParseMode.HTML,reply_markup=advanced_publish_keyboard())
+        elif image_path:
+            await message.answer_photo(FSInputFile(image_path))
+            await message.answer(post,parse_mode=ParseMode.HTML,reply_markup=advanced_publish_keyboard())
+        else:
+            await message.answer(post,parse_mode=ParseMode.HTML,reply_markup=advanced_publish_keyboard())
+        panel=v57_quality_panel(audit,verify)
+        if not ready:
+            panel += "\n\n⚠️ <b>این خبر به‌دلیل اطمینان پایین/تناقض برای انتشار خودکار تأیید نشده است.</b>"
+        await message.answer("✅ <b>خبر آماده بررسی تحریریه است.</b>"+panel,parse_mode=ParseMode.HTML,reply_markup=main_keyboard())
+    except Exception as error:
+        stat_inc("failed")
+        log.exception("V5.7 news processing error")
+        if status:
+            try: await status.delete()
+            except Exception: pass
+        await message.answer("❌ خطا هنگام پردازش خبر:\n\n"+str(error)[:1500],reply_markup=main_keyboard())
+    finally:
+        processing_users.discard(user_id)
+
+
+# V5.7 موتور اصلی را روی همان مسیر صف/ورودی قبلی سوار می‌کنیم.
+process_news=v57_process_news
+advanced_process_news=v57_process_news
 
 # ============================================================
 # MAIN
@@ -3147,7 +3663,7 @@ DISABLED_FEATURES_V531 = {
 
 
 def version_feature_policy():
-    """سیاست قابلیت‌های غیرفعال نسخه 5.6.0."""
+    """سیاست قابلیت‌های غیرفعال نسخه 5.7.0."""
     return {
         "version": BOT_VERSION,
         "hashtags": "disabled",
