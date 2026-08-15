@@ -50,7 +50,28 @@ from openai import AsyncOpenAI
 # - Railway friendly
 # ============================================================
 
-BOT_VERSION = "v5.4.0"
+BOT_VERSION = "v5.5.0"
+
+# ============================================================
+# V5.5.0 CANONICAL CATEGORY / TITLE STICKERS
+# ============================================================
+CATEGORY_STICKERS = {
+    "game": "🎮",
+    "cinema": "🎥",
+    "other": "📢",
+}
+CATEGORY_LABELS = {
+    "game": "بازی",
+    "cinema": "سینما و فیلم",
+    "other": "اخبار متفرقه",
+}
+
+def v55_category_legend():
+    return "🎮 بازی  •  🎥 سینما و فیلم  •  📢 اخبار متفرقه"
+
+def v55_panel_header(title: str) -> str:
+    return f"╭──────────────╮\n│ ✦ {title}\n╰──────────────╯"
+
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 CHANNEL_ID = os.getenv("CHANNEL_ID", "@Gamefa_official").strip()
@@ -402,7 +423,7 @@ def starts_with_persian(text):
     text = text.strip()
 
     text = re.sub(
-        r"^[🎮🎬📱📢🟣📰🔵🟢🟡🟠⚪⚫\s\-–—•]+",
+        r"^[🎮🎥📱📢🟣📰🔵🟢🟡🟠⚪⚫\s\-–—•]+",
         "",
         text,
     ).strip()
@@ -472,12 +493,12 @@ def detect_category(text):
     ]
     # نشانه‌های بسیار قوی سینمایی بر هر اشاره جانبی به بازی غلبه می‌کنند.
     if any(x in t for x in ["لایو اکشن", "live action", "تاریخ اکران", "فیلمبرداری", "فیلم‌برداری", "بازیگر", "actor", "actress", "casting", "فیلم", "سریال", "movie", "film"]):
-        return "🎬"
+        return "🎥"
     gs = sum(1 for x in game if x in t)
     ms = sum(1 for x in movie if x in t)
     os = sum(1 for x in other if x in t)
     if ms > gs:
-        return "🎬"
+        return "🎥"
     if gs > 0 and gs >= ms:
         return "🎮"
     if os > 0:
@@ -517,7 +538,7 @@ def clean_ai_text(text):
     )
 
     text = re.sub(
-        r"(?m)^\s*[🎮🎬📱📢🟣📰🔵🟢🟡🟠⚪⚫]\s*",
+        r"(?m)^\s*[🎮🎥📱📢🟣📰🔵🟢🟡🟠⚪⚫]\s*",
         "",
         text,
     )
@@ -1187,7 +1208,7 @@ def clean_sentence(sentence):
     )
 
     sentence = re.sub(
-        r"^\s*[🎮🎬📱📢🟣📰🔵🟢🟡🟠⚪⚫]+\s*",
+        r"^\s*[🎮🎥📱📢🟣📰🔵🟢🟡🟠⚪⚫]+\s*",
         "",
         sentence,
     )
@@ -2426,7 +2447,7 @@ def parse_editable_post(post):
 
 
 def category_label(category):
-    return {"🎮": "بازی", "🎬": "فیلم و سریال", "📢": "اخبار متفرقه"}.get(category, "اخبار متفرقه")
+    return {"🎮": "بازی", "🎥": "فیلم و سریال", "📢": "اخبار متفرقه"}.get(category, "اخبار متفرقه")
 
 
 def title_quality(title):
@@ -2436,7 +2457,7 @@ def title_quality(title):
     if len(title) > 110: score -= 10
     if "گیمفا" in title.lower(): score -= 20
     if "#" in title: score -= 15
-    if re.search(r"[🎮🎬📢]", title): score -= 10
+    if re.search(r"[🎮🎥📢]", title): score -= 10
     return max(0, min(100, score))
 
 
@@ -2452,7 +2473,7 @@ def editorial_quality_score(title, body, source, facts):
 
 def quality_gate(title, body, source, facts):
     checks = {
-        "category": detect_category(title + " " + body) in ("🎮", "🎬", "📢"),
+        "category": detect_category(title + " " + body) in ("🎮", "🎥", "📢"),
         "persian_title": starts_with_persian(title),
         "persian_body": all(starts_with_persian(x) for x in re.split(r"(?<=[.!؟])\s+", body) if x.strip()),
         "source": bool(source.get("title") or source.get("body")),
@@ -2476,7 +2497,7 @@ def title_options(title, category):
     for a, b in replacements:
         if a in base:
             options.append(base.replace(a, b, 1))
-    if len(options) < 3 and category == "🎬" and "فیلم" not in base and "سریال" not in base:
+    if len(options) < 3 and category == "🎥" and "فیلم" not in base and "سریال" not in base:
         options.append("تازه‌ترین جزئیات درباره " + base)
     if len(options) < 3:
         options.append("جزئیات جدید درباره " + base)
