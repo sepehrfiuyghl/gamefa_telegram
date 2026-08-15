@@ -43,7 +43,7 @@ from openai import AsyncOpenAI
 # - استخراج چندمرحله‌ای با aiohttp + BeautifulSoup
 # - fallback اختیاری OpenAI Web Search
 # - استخراج تصویر og:image / twitter:image / article image
-# - تولید تیتر فارسی + دقیقاً 7 جمله در یک پاراگراف
+# - تولید تیتر فارسی حداکثر ۸ کلمه + متن ۱ تا ۱۰ جمله‌ای به‌صورت خودکار
 # - تشخیص خبر تکراری
 # - 5 کلید OpenAI با failover
 # - آرشیو JSON
@@ -93,7 +93,7 @@ ENABLE_HASHTAGS = False  # هشتگ‌ها عمداً در v5.3.1 غیرفعال
 ENABLE_SPOILER_DETECTION = os.getenv("ENABLE_SPOILER_DETECTION", "1").strip().lower() in ("1", "true", "yes", "on")
 BREAKING_THRESHOLD = float(os.getenv("BREAKING_THRESHOLD", "0.82"))
 QUEUE_ENABLED = os.getenv("QUEUE_ENABLED", "1").strip().lower() in ("1", "true", "yes", "on")
-NEWS_LENGTH = os.getenv("NEWS_LENGTH", "7").strip()
+NEWS_LENGTH = os.getenv("NEWS_LENGTH", "auto").strip()
 WRITING_MODE = os.getenv("WRITING_MODE", "standard").strip().lower()
 LEARNING_FILE = Path(os.getenv("LEARNING_FILE", "editorial_learning.json"))
 STATS_FILE = Path(os.getenv("STATS_FILE", "editorial_stats.json"))
@@ -1156,48 +1156,32 @@ async def extract_facts(source):
 # ============================================================
 
 NEWS_PROMPT = """
-تو سردبیر ارشد و ویراستار حرفه‌ای اخبار فارسی Gamefa هستی.
-هدف فقط خلاصه‌کردن نیست؛ باید یک خبر آماده انتشار، روان، دقیق، جذاب و طبیعی بسازی.
+تو سردبیر ارشد اخبار فارسی Gamefa هستی.
+
+از Factهای داده‌شده یک خبر فارسی حرفه‌ای، روان، دقیق و جذاب تولید کن.
 
 ساختار خروجی:
-- خط اول: یک تیتر کوتاه، دقیق و خبری.
-- خط دوم: یک پاراگراف شامل دقیقاً 7 جمله.
-- هر 7 جمله باید در همان یک پاراگراف باشند.
+خط اول: تیتر
+خط دوم به بعد: فقط یک پاراگراف خبری.
 
-قوانین دقت:
-1) فقط از FACTS و منبع استفاده کن؛ هیچ واقعیت، عدد، تاریخ، نقش، نام یا جزئیات جدیدی نساز.
-2) ادعاهای قطعی را از شایعه، احتمال و گزارش جدا نگه دار.
-3) «رسمی»، «تأیید شد»، «اعلام شد» و عبارت‌های مشابه فقط وقتی مجازند که منبع شاهد روشن داشته باشد.
-4) تاریخ‌ها، اعداد، نام اشخاص، شرکت‌ها، بازی‌ها، فیلم‌ها و پلتفرم‌ها را دقیق حفظ کن.
-5) اگر چند منبع وجود دارد، فقط اطلاعاتی را اضافه کن که با رویداد اصلی سازگار و قابل اتکا هستند.
-6) اگر چیزی در منبع مبهم است، آن را قطعی‌تر از منبع بیان نکن.
-
-قوانین تیتر:
-1) تیتر باید با فارسی شروع شود و با یک فعل/خبر روشن تمام شود.
-2) تیتر باید مهم‌ترین اتفاق خبر را بگوید، نه حاشیه را.
-3) تیتر جذاب باشد اما Clickbait، هیجانیِ اغراق‌آمیز یا مبهم نباشد.
-4) از عبارت‌های کلی مثل «جزئیات جالبی منتشر شد» یا «خبر مهمی برای طرفداران» استفاده نکن.
-5) نام انگلیسی را حفظ کن، اما تیتر با نام انگلیسی شروع نشود.
-
-قوانین نگارش:
-1) جمله اول باید مهم‌ترین خبر را سریع و روشن منتقل کند.
-2) جمله‌های بعدی باید به ترتیب اهمیت، جزئیات، زمینه و اطلاعات تکمیلی را ارائه کنند.
-3) هر جمله یک کار مشخص انجام دهد؛ جمله‌های تکراری یا پرکننده ممنوع.
-4) متن باید مثل نوشته یک خبرنگار فارسی‌زبان طبیعی باشد، نه ترجمه تحت‌اللفظی انگلیسی.
-5) از تکرار بیش از حد «همچنین»، «طبق گزارش‌ها»، «این خبر»، «در ادامه» و ساختارهای یکسان خودداری کن.
-6) از جمله‌های بیش از حد طولانی، چندبخشی و سنگین پرهیز کن.
-7) اتصال جمله‌ها نرم باشد و متن حس پرش موضوعی نداشته باشد.
-8) اگر منبع اطلاعات کافی برای یک نکته ندارد، با جمله عمومی و ساختگی آن را پر نکن.
-9) از عبارت‌های بی‌ارزش مانند «این موضوع برای طرفداران جالب خواهد بود» یا «اطلاعات بیشتری در آینده منتشر می‌شود» استفاده نکن؛ مگر اینکه خود منبع چنین چیزی را گفته باشد.
-10) لحن حرفه‌ای، روان و کمی جذاب باشد؛ بدون شوخی، نظر شخصی یا اغراق.
-
-قوانین قالب:
-- تیتر و هر 7 جمله باید با فارسی شروع شوند.
-- Markdown، Emoji، هشتگ و لینک ممنوع.
+قوانین اصلی:
+- تیتر حداکثر ۸ کلمه باشد؛ کوتاه، جذاب و خبری باشد و Clickbait نباشد.
+- متن بین ۱ تا ۱۰ جمله باشد؛ تعداد جمله ثابت نیست.
+- فقط به اندازه‌ای بنویس که اصل خبر کامل و قابل فهم منتقل شود.
+- اگر خبر با ۲، ۳ یا ۴ جمله کامل می‌شود، جمله اضافه برای پر کردن فضا ننویس.
+- هیچ جمله‌ای صرفاً برای رسیدن به تعداد مشخص اضافه نشود.
+- اطلاعات مهم، نام‌ها، تاریخ‌ها، اعداد و جزئیات تعیین‌کننده حفظ شوند.
+- اطلاعات تکراری، حاشیه‌ای و کم‌اهمیت حذف شوند.
+- هیچ اطلاعاتی حدس زده یا اختراع نشود.
+- متن طبیعی و روان باشد و شبیه ترجمه ماشینی نباشد.
+- تیتر و هر جمله باید با فارسی شروع شوند؛ جمله با نام انگلیسی شروع نشود.
+- نام‌های انگلیسی را در صورت نیاز حفظ کن.
 - نام گیمفا در تیتر نیاید.
-- هیچ اشاره‌ای به AI، Reviewer، Fact یا فرایند تولید نکن.
+- هیچ Markdown، Emoji، لینک، هشتگ یا توضیح درباره AI، Reviewer، Fact یا فرایند تولید نیاور.
+- هیچ تحلیل شخصی یا نظر نویسنده اضافه نکن.
+- متن را در یک پاراگراف واحد نگه دار.
 
-فقط تیتر و یک پاراگراف 7 جمله‌ای خروجی بده.
+اصل مهم: «کوتاه‌ترین متن کاملی که منظور خبر را دقیق منتقل می‌کند» را تولید کن.
 """
 
 
@@ -1249,56 +1233,55 @@ def split_sentences(text):
     return title, sentences
 
 
-def local_news_fallback(source, facts):
-    title = strip_site_branding_from_title(
-        clean_text(source.get("title", ""))
-    )
+def title_word_count(title):
+    return len(re.findall(r"[\w\u0600-\u06FF]+", title or ""))
 
-    title = ensure_persian_start(
-        title or "خبر جدید",
-        True,
-    )
+
+def valid_title(title):
+    return bool(title) and starts_with_persian(title) and title_word_count(title) <= 8
+
+
+def valid_sentence_count(sentences, requested=0):
+    count = len(sentences)
+    if requested and requested > 0:
+        return count == requested and 1 <= count <= 10
+    return 1 <= count <= 10
+
+
+def local_news_fallback(source, facts, max_sentences=10):
+    title = strip_site_branding_from_title(clean_text(source.get("title", "")))
+    title = ensure_persian_start(title or "خبر جدید", True)
+    words = re.findall(r"[\w\u0600-\u06FF]+", title)
+    if len(words) > 8:
+        title = " ".join(words[:8]).strip()
 
     pool = []
-
     for item in facts.get("facts", []):
         if isinstance(item, dict):
-            fact = clean_sentence(
-                str(item.get("fact", ""))
-            )
+            fact = clean_sentence(str(item.get("fact", "")))
             if fact:
                 pool.append(fact)
 
     raw = clean_text(source.get("body", ""))
-
-    for item in re.split(
-        r"(?<=[.!؟])\s+",
-        raw,
-    ):
+    for item in re.split(r"(?<=[.!؟])\s+", raw):
         item = clean_sentence(item)
         if len(item) >= 25:
             pool.append(item)
 
-    unique = []
-    seen = set()
-
+    unique, seen = [], set()
     for item in pool:
         key = norm(item)
         if not key or key in seen:
             continue
-
         seen.add(key)
-        unique.append(
-            ensure_persian_start(item, False)
-        )
+        unique.append(ensure_persian_start(item, False))
+        if len(unique) >= max_sentences:
+            break
 
-    while len(unique) < 7:
-        unique.append(
-            "جزئیات ارائه‌شده در منبع، به همین رویداد و اطلاعات منتشرشده درباره آن مربوط است."
-        )
-
-    return title + "\n" + " ".join(unique[:7])
-
+    # هیچ جمله ساختگی برای پر کردن تعداد اضافه نمی‌شود.
+    if not unique:
+        unique = ["جزئیات بیشتری از این خبر در دسترس نیست."]
+    return title + "\n" + " ".join(unique[:max_sentences])
 
 async def generate_news(source, facts):
     facts_json = json.dumps(
@@ -1361,7 +1344,7 @@ FORBIDDEN_OUTPUT_TERMS = [
 def validate_generated_output(generated):
     title, sentences = split_sentences(generated)
 
-    if not title or len(sentences) != 7:
+    if not valid_title(title) or not valid_sentence_count(sentences):
         return False
 
     combined = (
@@ -1387,7 +1370,7 @@ def format_post(generated):
 
     title, sentences = split_sentences(generated)
 
-    if len(sentences) != 7:
+    if not valid_title(title) or not valid_sentence_count(sentences):
         return ""
 
     title = strip_site_branding_from_title(
@@ -2200,12 +2183,13 @@ async def text_handler(message: Message):
 # ============================================================
 
 ADVANCED_LENGTHS = {
+    "auto": 0,
+    "خودکار": 0,
     "7": 7,
     "10": 10,
-    "15": 15,
     "short": 5,
     "کوتاه": 5,
-    "استاندارد": 7,
+    "استاندارد": 0,
     "بلند": 10,
 }
 
@@ -2392,8 +2376,8 @@ def build_source_context(source, related):
 
 
 def normalize_length(value):
-    value = str(value or "7").strip().lower()
-    return ADVANCED_LENGTHS.get(value, 7)
+    value = str(value or "auto").strip().lower()
+    return ADVANCED_LENGTHS.get(value, 0)
 
 
 def normalize_mode(value):
@@ -2416,42 +2400,29 @@ async def rewrite_news_with_settings(source, facts, length=None, mode=None):
     length = normalize_length(length or NEWS_LENGTH)
     mode = normalize_mode(mode or WRITING_MODE)
     context = learning_context()
+    length_instruction = (
+        f"تعداد جمله‌های بدنه دقیقاً {length} جمله باشد."
+        if length > 0 else
+        "تعداد جمله‌ها را خودت بر اساس حجم و اهمیت خبر انتخاب کن؛ بین ۱ تا ۱۰ جمله و بدون جمله اضافه."
+    )
     prompt = f"""
-تو سردبیر ارشد Gamefa هستی.
-یک خبر فارسی آماده انتشار بنویس؛ متن باید روان، دقیق، منسجم و جذاب باشد، اما هرگز از واقعیت منبع جلو نزند.
+تو سردبیر Gamefa هستی. یک خبر فارسی حرفه‌ای بساز.
 حالت نگارش: {WRITING_MODES[mode]}
-تعداد جمله‌های بدنه: دقیقاً {length}
-
-فرمول پیشنهادی برای جریان خبر:
-- جمله 1: مهم‌ترین اتفاق و اصل خبر.
-- جمله 2: مهم‌ترین جزئیات یا تأییدکننده خبر.
-- جمله 3: تاریخ، عدد، بازیگر، سازنده، پلتفرم یا جزئیات کلیدی در صورت وجود.
-- جمله 4: زمینه یا سابقه مرتبط، فقط اگر در منبع آمده باشد.
-- جمله 5: جزئیات تکمیلی که ارزش خبری دارند.
-- جمله 6: اطلاعات مهم باقی‌مانده یا وضعیت فعلی.
-- جمله 7: جمع‌بندی طبیعی خبر، فقط بر پایه اطلاعات موجود.
-
-قواعد سخت:
-- هیچ واقعیت جدیدی نساز و هیچ ابهامی را قطعی نکن.
-- ادعاهای «رسمی» و «تأییدشده» فقط با شاهد منبع مجازند.
-- اعداد و تاریخ‌ها را دقیق حفظ کن.
-- نام‌های انگلیسی را حفظ کن اما هیچ جمله‌ای با نام انگلیسی شروع نشود.
-- تیتر با فارسی شروع شود و دقیقاً مهم‌ترین اتفاق را بیان کند.
-- جمله اول را قوی و مستقیم بنویس؛ با مقدمه‌های خالی شروع نکن.
-- از تکرار «همچنین»، «طبق گزارش‌ها»، «این خبر»، «در ادامه» و ساختارهای مشابه دوری کن.
-- جمله‌های پرکننده، کلیشه‌ای و بدون اطلاعات ممنوع.
-- ترجمه تحت‌اللفظی ممنوع؛ فارسی طبیعی و روزنامه‌نگارانه بنویس.
-- هر جمله باید اطلاعات تازه و مرتبطی نسبت به جمله قبل داشته باشد.
-- لحن جذاب باشد اما Clickbait، هیجان مصنوعی و نظر شخصی ممنوع.
-- هیچ Markdown، Emoji، هشتگ، لینک، Reviewer، AI، Fact یا توضیح فرایند تولید نیاور.
-- خروجی فقط تیتر در خط اول و سپس یک پاراگراف {length} جمله‌ای باشد.
+{length_instruction}
+تیتر حداکثر ۸ کلمه باشد.
+تیتر و بدنه باید با فارسی شروع شوند.
+همه واقعیت‌های مهم را حفظ کن و چیزی اختراع نکن.
+نام‌های انگلیسی را حفظ کن اما جمله با نام انگلیسی شروع نشود.
+هیچ Markdown، Emoji، لینک، Reviewer، AI، Fact یا توضیح فرایند تولید نیاور.
+اطلاعات تکراری و حاشیه‌ای را حذف کن و کوتاه‌ترین متن کامل را بنویس.
+خروجی فقط تیتر در خط اول و سپس یک پاراگراف واحد باشد.
 """
     if context:
         prompt += "\nنمونه اصلاحات قبلی ادمین برای رعایت سبک:\n" + context
     input_text = "FACTS:\n" + json.dumps(facts, ensure_ascii=False) + "\n\n" + build_source_context(source, source.get("related_sources", []))
     response = await openai_failover(lambda client: client.responses.create(
         model=MODEL, instructions=prompt, input=input_text,
-        max_output_tokens=max(1200, length * 220),
+        max_output_tokens=max(1200, (length or 6) * 220),
     ))
     return (response.output_text or "").strip()
 
@@ -2507,7 +2478,7 @@ def key_health_snapshot():
 
 def editorial_dashboard_text():
     return (
-        "📊 <b>داشبورد تحریریه v5.7.0</b>\n\n"
+        "📊 <b>داشبورد تحریریه v5.8.0</b>\n\n"
         f"📰 پردازش‌شده: <b>{editorial_stats.get('processed',0)}</b>\n"
         f"📢 منتشرشده: <b>{editorial_stats.get('published',0)}</b>\n"
         f"♻️ تکراری: <b>{editorial_stats.get('duplicates',0)}</b>\n"
@@ -2636,15 +2607,9 @@ async def advanced_process_news(message, text):
         mode = normalize_mode(WRITING_MODE)
         generated = await rewrite_news_with_settings(source, facts, length, mode)
         title, sentences = split_sentences(generated)
-        if len(sentences) != length or not starts_with_persian(title) or any(not starts_with_persian(x) for x in sentences):
+        if not valid_title(title) or not valid_sentence_count(sentences, length) or any(not starts_with_persian(x) for x in sentences):
             generated = local_news_fallback(source, facts)
             title, sentences = split_sentences(generated)
-            # در حالت پیش‌فرض همیشه 7 جمله داریم؛ اگر طول سفارشی است، تا حد امکان همان تعداد را می‌سازیم.
-            if length != 7:
-                sentences = sentences[:length]
-                while len(sentences) < length:
-                    sentences.append("این گزارش جزئیات بیشتری درباره موضوع اصلی ارائه می‌کند.")
-                generated = title + "\n" + " ".join(sentences)
         body = " ".join(sentences)
         post = build_custom_post(title, body, source, facts)
         post = v56_finalize_post(post, source, facts)
@@ -2768,7 +2733,8 @@ async def rewrite_current_callback(callback):
     try:
         generated = await rewrite_news_with_settings(item["source"], item["facts"], item.get("length", 7), item.get("mode", "standard"))
         title, sentences = split_sentences(generated)
-        if len(sentences) != item.get("length", 7):
+        requested = item.get("length", 0)
+        if not valid_title(title) or not valid_sentence_count(sentences, requested):
             await callback.message.answer("⚠️ بازنویسی دقیق نبود؛ دوباره امتحان کن."); return
         body = " ".join(sentences)
         post = build_custom_post(title, body, item["source"], item["facts"])
@@ -2823,6 +2789,11 @@ async def handle_editorial_text(message):
         if not new:
             await message.answer("❌ متن خالی است."); return True
         if kind == "title":
+            new_words = re.findall(r"[\w\u0600-\u06FF]+", new)
+            if len(new_words) > 8:
+                await message.answer("❌ تیتر باید حداکثر ۸ کلمه باشد.")
+                item["awaiting_edit"] = kind
+                return True
             item["title"] = ensure_persian_start(new, True)
         else:
             item["body"] = clean_text(new)
@@ -2837,7 +2808,8 @@ async def handle_editorial_text(message):
         try:
             generated = await rewrite_news_with_settings(item["source"], item["facts"], item.get("length", 7), mode)
             title, sentences = split_sentences(generated)
-            if len(sentences) == item.get("length", 7):
+            requested = item.get("length", 0)
+            if valid_title(title) and valid_sentence_count(sentences, requested):
                 item["title"] = title; item["body"] = " ".join(sentences)
                 item["text"] = build_custom_post(title, item["body"], item["source"], item["facts"])
             await message.answer(item["text"], parse_mode=ParseMode.HTML, reply_markup=advanced_publish_keyboard())
@@ -3096,6 +3068,9 @@ def v56_finalize_post(post, source, facts):
     """پاک‌سازی نهایی: استیکر تیتر فقط یکی از سه دسته مجاز باشد و هشتگ حذف شود."""
     title, body = parse_editable_post(post)
     title = re.sub(r"^[🎮🎥📢🎬📱📰🟣🔵🟢🟡🟠⚪⚫🚨\s]+", "", title).strip()
+    title_words = re.findall(r"[\w\u0600-\u06FF]+", title)
+    if len(title_words) > 8:
+        title = " ".join(title_words[:8])
     category = detect_category(title + " " + body, facts)
     title = f"{category} {title}"
     body = re.sub(r"(?<!\w)#[\w\u0600-\u06FF-]+", "", body)
@@ -3291,65 +3266,6 @@ def v57_title_body_match(title, body, source):
     return round(min(1.0, overlap*0.65+source_overlap*0.35),2)
 
 
-def v58_style_audit(title, body):
-    """ممیزی محلی برای روانی، تنوع و ارزش خبری متن؛ بدون دخالت در واقعیت‌ها."""
-    title = clean_text(title or "")
-    body = clean_text(body or "")
-    sentences = [x.strip() for x in re.split(r"(?<=[.!؟])\s+", body) if x.strip()]
-    if not title or not sentences:
-        return {"score": 0.0, "naturalness": 0.0, "repetition": 1.0, "filler": 1.0, "issues": ["متن خالی یا ناقص است."]}
-
-    words_per_sentence = [len(re.findall(r"[\w\u0600-\u06FF]+", x)) for x in sentences]
-    avg_len = sum(words_per_sentence) / max(1, len(words_per_sentence))
-    too_long = sum(1 for n in words_per_sentence if n > 42)
-    too_short = sum(1 for n in words_per_sentence if n < 7)
-
-    starts = []
-    for sentence in sentences:
-        words = re.findall(r"[\w\u0600-\u06FF]+", sentence.lower())
-        starts.append(" ".join(words[:2]))
-    repeated_starts = len(starts) - len(set(starts))
-
-    low = norm(title + " " + body)
-    repeated_connectors = sum(max(0, low.count(norm(x)) - 1) for x in ["همچنین", "طبق گزارش", "این خبر", "در ادامه", "از سوی دیگر"])
-    filler_terms = [
-        "جزئیات بیشتری درباره موضوع اصلی", "برای طرفداران جالب خواهد بود",
-        "اطلاعات بیشتری در آینده منتشر می‌شود", "خبر مهمی برای طرفداران",
-        "این موضوع می‌تواند جالب باشد", "در این میان"
-    ]
-    filler_hits = sum(low.count(norm(x)) for x in filler_terms if norm(x))
-
-    length_score = 1.0
-    if avg_len > 38: length_score -= 0.15
-    if avg_len > 45: length_score -= 0.15
-    length_score -= min(0.20, too_long * 0.07)
-    length_score -= min(0.15, too_short * 0.05)
-    repetition_penalty = min(0.30, repeated_starts * 0.10 + repeated_connectors * 0.05)
-    filler_penalty = min(0.30, filler_hits * 0.15)
-    naturalness = max(0.0, min(1.0, length_score - repetition_penalty - filler_penalty))
-
-    issues=[]
-    if too_long: issues.append("برخی جمله‌ها بیش از حد طولانی هستند.")
-    if repeated_starts: issues.append("شروع چند جمله تکراری است.")
-    if repeated_connectors: issues.append("واژه‌های رابط بیش از حد تکرار شده‌اند.")
-    if filler_hits: issues.append("جمله یا عبارت کم‌ارزش/پرکننده دیده شد.")
-    if len(title.split()) > 18: issues.append("تیتر طولانی است.")
-    if len(title.split()) < 4: issues.append("تیتر بیش از حد کوتاه است.")
-
-    title_score = 1.0
-    if len(title.split()) > 18: title_score -= 0.15
-    if len(title.split()) < 4: title_score -= 0.10
-    score = max(0.0, min(1.0, naturalness * 0.75 + title_score * 0.25))
-    return {
-        "score": round(score, 2),
-        "naturalness": round(naturalness, 2),
-        "repetition": round(min(1.0, repeated_starts * 0.15 + repeated_connectors * 0.08), 2),
-        "filler": round(min(1.0, filler_hits * 0.2), 2),
-        "avg_sentence_words": round(avg_len, 1),
-        "issues": issues[:6],
-    }
-
-
 def v57_build_audit(source, facts, draft_title, draft_body, related=None):
     related=related or []
     evidence=v57_source_evidence(source,facts)
@@ -3362,11 +3278,10 @@ def v57_build_audit(source, facts, draft_title, draft_body, related=None):
     multi=min(1.0,len(related)/2.0)
     official_bonus=0.06 if status=="رسمی" else 0.0
     conflict_penalty=min(0.25,len(conflicts)*0.08)
-    style=v58_style_audit(draft_title,draft_body)
     confidence=max(0.0,min(1.0,
-        quality*0.20 + evidence["numbers"]*0.15 + evidence["dates"]*0.12 +
-        evidence["claims"]*0.13 + title_match*0.08 + multi*0.08 + official_bonus +
-        style["score"]*0.13 + (0.05 if clickbait<0.15 else 0.0) - conflict_penalty
+        quality*0.28 + evidence["numbers"]*0.15 + evidence["dates"]*0.12 +
+        evidence["claims"]*0.16 + title_match*0.10 + multi*0.08 + official_bonus +
+        (0.05 if clickbait<0.15 else 0.0) - conflict_penalty
     ))
     return {
         "confidence":round(confidence,2),
@@ -3382,32 +3297,23 @@ def v57_build_audit(source, facts, draft_title, draft_body, related=None):
         "archive_conflicts":conflicts,
         "related_sources":len(related),
         "category":detect_category(draft_title+" "+draft_body,facts),
-        "style":style,
     }
 
 
 V57_VERIFY_PROMPT="""
-تو ویراستار نهایی، راستی‌آزما و ویراستار زبان تحریریه Gamefa هستی.
-وظیفه تو بررسی پیش‌نویس در برابر منبع و FACTS است؛ چیزی را حدس نزن و اطلاعات جدید اضافه نکن.
+تو ویراستار نهایی و راستی‌آزمای تحریریه Gamefa هستی.
+وظیفه تو فقط بررسی پیش‌نویس در برابر منبع و FACTS است؛ چیزی را حدس نزن.
 
-قوانین دقت:
+قوانین:
 1) هر ادعای مهم باید در منبع/FACTS پشتیبانی شود.
-2) «رسمی/تأیید شد/اعلام شد» فقط در صورت وجود شاهد صریح مجاز است.
-3) اعداد، تاریخ‌ها و نام‌ها باید با منبع سازگار باشند.
-4) اگر جمله‌ای اطلاعات تازه و بدون پشتوانه دارد، hallucination=true.
-5) تیتر باید دقیقاً همان رویداد را بگوید و Clickbait نباشد.
-
-قوانین روانی و جذابیت:
-6) متن باید فارسی طبیعی و روزنامه‌نگارانه باشد، نه ترجمه تحت‌اللفظی.
-7) جمله اول باید مهم‌ترین خبر را مستقیم منتقل کند.
-8) هر جمله باید ارزش خبری مستقل داشته باشد و جمله پرکننده ممنوع است.
-9) تکرار بیش از حد «همچنین»، «طبق گزارش‌ها»، «این خبر»، «در ادامه» یا شروع‌های مشابه را خطا حساب کن.
-10) جمله‌های بسیار طولانی، سنگین یا چندبخشی را ایراد حساب کن.
-11) تیتر باید کوتاه، دقیق و جذاب باشد؛ بدون اغراق.
-
-اگر ایراد وجود دارد، نسخه اصلاح‌شده کوتاه از تیتر و بدنه را پیشنهاد بده؛ فقط بر اساس FACTS.
-خروجی فقط JSON معتبر با کلیدهای زیر باشد:
-{"pass":true,"score":0.0,"hallucination":false,"official_claim_ok":true,"numbers_ok":true,"dates_ok":true,"title_ok":true,"style_ok":true,"naturalness":0.0,"repetition":0.0,"clickbait":0.0,"spoiler":"بدون اسپویل","issues":[],"corrected_title":"","corrected_body":""}
+2) «رسمی/تأیید شد» فقط در صورت وجود شاهد صریح مجاز است.
+3) اعداد و تاریخ‌ها باید با منبع سازگار باشند.
+4) تیتر باید دقیقاً همان رویداد را بگوید و Clickbait نباشد.
+5) نام اشخاص/شرکت‌ها/بازی‌ها/فیلم‌ها نباید تغییر کند.
+6) اگر جمله‌ای اطلاعات تازه و بدون پشتوانه دارد، hallucination=true.
+7) اگر اشکال وجود دارد، نسخه اصلاح‌شده کوتاه از تیتر و بدنه را پیشنهاد بده؛ اطلاعات جدید اضافه نکن.
+8) خروجی فقط JSON معتبر با کلیدهای زیر باشد:
+{"pass":true,"score":0.0,"hallucination":false,"official_claim_ok":true,"numbers_ok":true,"dates_ok":true,"title_ok":true,"clickbait":0.0,"spoiler":"بدون اسپویل","issues":[],"corrected_title":"","corrected_body":""}
 """
 
 
@@ -3432,13 +3338,11 @@ async def v57_verify_draft(source, facts, title, body, related=None):
         data=json.loads(raw[start:end+1])
         if not isinstance(data,dict):
             raise ValueError("خروجی ویراستار دیکشنری نیست")
-        for key,default in (("pass",False),("score",0.0),("hallucination",True),("official_claim_ok",False),("numbers_ok",False),("dates_ok",False),("title_ok",False),("style_ok",audit.get("style",{}).get("score",0)>=0.72),("naturalness",audit.get("style",{}).get("naturalness",0.0)),("repetition",audit.get("style",{}).get("repetition",1.0)),("clickbait",audit["clickbait"]),("spoiler",audit["spoiler"]),("issues",[]),("corrected_title",""),("corrected_body","")):
+        for key,default in (("pass",False),("score",0.0),("hallucination",True),("official_claim_ok",False),("numbers_ok",False),("dates_ok",False),("title_ok",False),("clickbait",audit["clickbait"]),("spoiler",audit["spoiler"]),("issues",[]),("corrected_title",""),("corrected_body","")):
             data.setdefault(key,default)
         data["local_audit"]=audit
         data["score"]=max(0.0,min(1.0,float(data.get("score",0) or 0)))
-        # حتی اگر مدل «pass» بدهد، ضعف شدید در روانی متن نباید از کنترل نهایی عبور کند.
-        data["style_ok"]=bool(data.get("style_ok")) and audit.get("style",{}).get("score",0)>=0.68
-        data["pass"]=bool(data.get("pass")) and not bool(data.get("hallucination")) and data["style_ok"]
+        data["pass"]=bool(data.get("pass")) and not bool(data.get("hallucination"))
         return data
     except Exception as error:
         log.warning("V5.7 verification failed: %s",error)
@@ -3461,7 +3365,7 @@ def v57_normalize_corrected(corrected_title, corrected_body, source, facts, leng
         return ""
     title=ensure_persian_start(title,True)
     sentences=split_sentences(title+"\n"+body)[1]
-    if len(sentences)!=length:
+    if not valid_title(title) or not valid_sentence_count(sentences, length):
         return ""
     sentences=[ensure_persian_start(clean_sentence(x),False) for x in sentences]
     return title+"\n"+" ".join(sentences)
@@ -3479,8 +3383,6 @@ def v57_quality_panel(audit, verify):
         f"📅 اعداد/تاریخ: <b>{'✅' if audit.get('numbers_ok') and audit.get('dates_ok') else '⚠️'}</b>\n"
         f"🏷 وضعیت خبر: <b>{escape_html(str(audit.get('status','نامشخص')))}</b>\n"
         f"🎯 تیتر: <b>{'✅' if verify.get('title_ok') else '⚠️'}</b>\n"
-        f"✍️ روانی متن: <b>{int(float((audit.get('style') or {}).get('naturalness',0))*100)}/100</b>\n"
-        f"🔁 تکرار: <b>{int(float((audit.get('style') or {}).get('repetition',0))*100)}/100</b>\n"
         f"🚫 Clickbait: <b>{int(float(audit.get('clickbait',0))*100)}/100</b>\n"
         f"⚠️ Spoiler: <b>{escape_html(str(audit.get('spoiler','بدون اسپویل')))}</b>\n"
         f"♻️ تناقض آرشیو: <b>{conflicts}</b>\n"
@@ -3527,32 +3429,25 @@ async def v57_process_news(message, text):
         related=await multi_source_research(source)
         source["related_sources"]=related
         conflicts=v57_archive_conflicts(source,facts)
-        if status: await status.edit_text("✍️ مرحله ۴/۶ — نگارش روان و دقیق خبر...")
+        if status: await status.edit_text("✍️ مرحله ۴/۶ — نگارش خبر بدون افزودن اطلاعات جدید...")
         length=normalize_length(NEWS_LENGTH)
         mode=normalize_mode(WRITING_MODE)
         generated=await rewrite_news_with_settings(source,facts,length,mode)
         title,sentences=split_sentences(generated)
-        if len(sentences)!=length or not starts_with_persian(title) or any(not starts_with_persian(x) for x in sentences):
+        if not valid_title(title) or not valid_sentence_count(sentences, length) or any(not starts_with_persian(x) for x in sentences):
             generated=local_news_fallback(source,facts)
             title,sentences=split_sentences(generated)
-            sentences=sentences[:length]
-            while len(sentences)<length:
-                sentences.append("این گزارش جزئیات بیشتری درباره موضوع اصلی ارائه می‌کند.")
-            generated=title+"\n"+" ".join(sentences)
         body=" ".join(sentences)
-        if status: await status.edit_text("🔎 مرحله ۵/۶ — ویراستار دوم، راستی‌آزمایی و سنجش روانی متن...")
+        if status: await status.edit_text("🔎 مرحله ۵/۶ — ویراستار دوم و راستی‌آزمایی نهایی...")
         verify=await v57_verify_draft(source,facts,title,body,related)
         # اگر ویراستار ایراد جدی پیدا کرد، فقط یک بار با ایرادهای مشخص بازنویسی می‌کنیم.
         if (not verify.get("pass") or float(verify.get("score",0))<V57_EDITOR_THRESHOLD) and V57_REWRITE_ON_VERIFY_FAIL:
             issues=verify.get("issues",[])
             correction_prompt=(
-                "خبر زیر را فقط بر اساس FACTS اصلاح کن و هیچ واقعیت جدیدی اضافه نکن. "
-                "اشکالات ویراستار را کامل برطرف کن. تیتر و سپس دقیقاً %d جمله در یک پاراگراف بده. "
-                "جمله اول مهم‌ترین خبر را مستقیم بگوید؛ جمله‌های بعدی جزئیات را با ترتیب منطقی بیاورند. "
-                "از تکرار «همچنین»، «طبق گزارش‌ها»، «این خبر» و جمله‌های پرکننده دوری کن. "
-                "متن باید فارسی طبیعی، روان و روزنامه‌نگارانه باشد و ترجمه تحت‌اللفظی نباشد. "
+                "خبر زیر را فقط بر اساس FACTS اصلاح کن. هیچ واقعیت جدیدی اضافه نکن. "
+                "اشکالات ویراستار را برطرف کن. تیتر حداکثر ۸ کلمه و سپس بین ۱ تا ۱۰ جمله در یک پاراگراف بده؛ تعداد جمله را بر اساس اطلاعات خبر انتخاب کن. "
                 "تیتر و هر جمله با فارسی شروع شود. هشتگ، ایموجی، لینک و تحلیل شخصی ممنوع.\n"
-                "اشکالات: %s\n" % (length,json.dumps(issues,ensure_ascii=False))
+                "اشکالات: %s\n" % json.dumps(issues,ensure_ascii=False)
             )
             try:
                 response=await openai_failover(lambda client: client.responses.create(
@@ -3562,7 +3457,7 @@ async def v57_process_news(message, text):
                 ))
                 corrected=(response.output_text or "").strip()
                 ct,cs=split_sentences(corrected)
-                if len(cs)==length:
+                if valid_title(ct) and valid_sentence_count(cs, length):
                     title,body=ct," ".join(cs)
                     verify=await v57_verify_draft(source,facts,title,body,related)
             except Exception as error:
