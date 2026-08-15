@@ -1,5 +1,8 @@
 __pycache__/
 *.pyc
 .env
-gamefa_images/
+*.log
 news_memory.json
+editorial_learning.json
+editorial_stats.json
+gamefa_images/
