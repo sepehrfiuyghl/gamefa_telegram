@@ -43,14 +43,15 @@ from openai import AsyncOpenAI
 # - استخراج چندمرحله‌ای با aiohttp + BeautifulSoup
 # - fallback اختیاری OpenAI Web Search
 # - استخراج تصویر og:image / twitter:image / article image
-# - تولید تیتر فارسی حداکثر ۸ کلمه + متن ۱ تا ۱۰ جمله‌ای به‌صورت خودکار
 # - تشخیص خبر تکراری
 # - 5 کلید OpenAI با failover
 # - آرشیو JSON
 # - Railway friendly
 # ============================================================
 
-BOT_VERSION = "v5.9.0"
+BOT_VERSION = "v5.9.1"
+# v5.9.1: no headline word-count limit
+HEADLINE_WORD_LIMIT = None
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 CHANNEL_ID = os.getenv("CHANNEL_ID", "@Gamefa_official").strip()
@@ -1165,7 +1166,6 @@ NEWS_PROMPT = """
 خط دوم به بعد: فقط یک پاراگراف خبری.
 
 قوانین اصلی:
-- تیتر حداکثر ۸ کلمه باشد؛ کوتاه، جذاب و خبری باشد و Clickbait نباشد.
 - متن بین ۱ تا ۱۰ جمله باشد؛ تعداد جمله ثابت نیست.
 - فقط به اندازه‌ای بنویس که اصل خبر کامل و قابل فهم منتقل شود.
 - اگر خبر با ۲، ۳ یا ۴ جمله کامل می‌شود، جمله اضافه برای پر کردن فضا ننویس.
@@ -2409,7 +2409,6 @@ async def rewrite_news_with_settings(source, facts, length=None, mode=None):
 تو سردبیر Gamefa هستی. یک خبر فارسی حرفه‌ای بساز.
 حالت نگارش: {WRITING_MODES[mode]}
 {length_instruction}
-تیتر حداکثر ۸ کلمه باشد.
 تیتر و بدنه باید با فارسی شروع شوند.
 همه واقعیت‌های مهم را حفظ کن و چیزی اختراع نکن.
 نام‌های انگلیسی را حفظ کن اما جمله با نام انگلیسی شروع نشود.
@@ -2791,7 +2790,6 @@ async def handle_editorial_text(message):
         if kind == "title":
             new_words = re.findall(r"[\w\u0600-\u06FF]+", new)
             if len(new_words) > 8:
-                await message.answer("❌ تیتر باید حداکثر ۸ کلمه باشد.")
                 item["awaiting_edit"] = kind
                 return True
             item["title"] = ensure_persian_start(new, True)
@@ -3445,7 +3443,6 @@ async def v57_process_news(message, text):
             issues=verify.get("issues",[])
             correction_prompt=(
                 "خبر زیر را فقط بر اساس FACTS اصلاح کن. هیچ واقعیت جدیدی اضافه نکن. "
-                "اشکالات ویراستار را برطرف کن. تیتر حداکثر ۸ کلمه و سپس بین ۱ تا ۱۰ جمله در یک پاراگراف بده؛ تعداد جمله را بر اساس اطلاعات خبر انتخاب کن. "
                 "تیتر و هر جمله با فارسی شروع شود. هشتگ، ایموجی، لینک و تحلیل شخصی ممنوع.\n"
                 "اشکالات: %s\n" % json.dumps(issues,ensure_ascii=False)
             )
@@ -3540,7 +3537,6 @@ advanced_process_news=v57_process_news
 # 06 شروع قدرتمند
 # 07 حذف حاشیه و عبارت‌های مصنوعی
 # 08 تنوع ساختاری
-# 09 تیتر حداکثر ۸ کلمه
 # 10 حفظ جزئیات حیاتی
 # 11 حذف تکرار
 # 12 تشخیص نوع خبر گیم
@@ -3688,7 +3684,6 @@ V59_NEWS_PROMPT = """
 تو سردبیر ارشد Gamefa هستی. هدف تو ساختن کوتاه‌ترین خبر کامل، دقیق، روان و جذاب است.
 
 قوانین قطعی:
-- تیتر حداکثر ۸ کلمه؛ خبری و جذاب، بدون کلیک‌بیت.
 - متن فقط ۱ تا ۱۰ جمله؛ تعداد جمله باید متناسب با اهمیت و حجم اطلاعات باشد.
 - خبر ساده را کوتاه نگه دار؛ اگر ۲ جمله کافی است، ۲ جمله بنویس.
 - هیچ جمله‌ای برای پر کردن تعداد اضافه نشود.
