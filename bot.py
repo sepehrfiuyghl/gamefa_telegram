@@ -4429,14 +4429,12 @@ async def v511_process_news(message, text):
 
         news_score=v511_news_score(source,facts,related,title,body,image_score)
         if breaking and float(news_score.get("score", 0) or 0) >= 70: stat_inc("breaking_ai")
-        engagement=v511_engagement_question(source,facts,float(news_score.get("score", 0) or 0))
+        # v5.11.2: no engagement text is ever appended to the published news.
+        engagement=""
 
         if status: await status.edit_text("🧾 مرحله ۷/۸ — ساخت پست نهایی و حافظه تحریریه...")
         post=build_custom_post(title,body,source,facts)
         post=v56_finalize_post(post,source,facts)
-        if engagement:
-            # سؤال تعامل جدا از متن خبری می‌ماند تا Fact Lock و پاراگراف خبر دست‌نخورده بمانند.
-            post=post.replace("\n\n<b>🆔 @Gamefa_official</b>", "\n\n"+escape_html(engagement)+"\n\n<b>🆔 @Gamefa_official</b>")
         if not post:
             raise RuntimeError("ساخت متن نهایی ناموفق بود.")
 
@@ -4472,15 +4470,9 @@ async def v511_process_news(message, text):
         else:
             await message.answer(post,parse_mode=ParseMode.HTML,reply_markup=advanced_publish_keyboard())
 
-        panel=v511_quality_panel(news_score,image_score,float(editor.get("score",0)),breaking,spoiler,sem_score if sem_score else None)
-        panel+=f"\n📚 منابع مرتبط: <b>{len(related)}</b>"
-        if related_archive:
-            panel+=f"\n🔄 ارتباط با آرشیو: <b>{len(related_archive)}</b>"
-            stat_inc("archive_links")
-        if update_mode: panel+="\n🔄 <b>Update Mode:</b> تغییر جدید برجسته شد"
-        if editor.get("issues"):
-            panel+="\n⚠️ <b>"+escape_html(" | ".join(map(str,editor["issues"][:3])))+"</b>"
-        await message.answer("✅ <b>خبر با Gamefa AI Editor آماده شد.</b>"+panel,parse_mode=ParseMode.HTML,reply_markup=main_keyboard())
+        # v5.11.2: the news message is the only user-visible result.
+        # No AI Editor/status/score/source panel is sent after it.
+
     except Exception as error:
         stat_inc("failed")
         log.exception("V5.11.0 news processing error")
