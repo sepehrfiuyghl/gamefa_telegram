@@ -4428,8 +4428,8 @@ async def v511_process_news(message, text):
         spoiler=detect_spoiler(source,facts)
 
         news_score=v511_news_score(source,facts,related,title,body,image_score)
-        if breaking and news_score>=70: stat_inc("breaking_ai")
-        engagement=v511_engagement_question(source,facts,news_score)
+        if breaking and float(news_score.get("score", 0) or 0) >= 70: stat_inc("breaking_ai")
+        engagement=v511_engagement_question(source,facts,float(news_score.get("score", 0) or 0))
 
         if status: await status.edit_text("🧾 مرحله ۷/۸ — ساخت پست نهایی و حافظه تحریریه...")
         post=build_custom_post(title,body,source,facts)
