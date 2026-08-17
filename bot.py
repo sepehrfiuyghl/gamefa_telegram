@@ -168,8 +168,6 @@ if legacy_key and legacy_key not in OPENAI_KEYS:
 OPENAI_CLIENTS = {}
 OPENAI_KEY_INDEX = 0
 OPENAI_KEY_COOLDOWN = {}
-# کلیدهایی که خطای دائمی گرفته‌اند؛ تا ری‌استارت بعدی از چرخه Failover خارج می‌شوند.
-OPENAI_DISABLED_KEYS = set()
 
 memory = []
 prepared = {}
@@ -225,20 +223,6 @@ def openai_retry_seconds(error):
     return 60.0
 
 
-def openai_is_permanently_invalid(error):
-    """Return True when the current key should be removed from failover."""
-    text = str(error or "").lower()
-    status = getattr(error, "status_code", None)
-    return (
-        status == 401
-        or "account_deactivated" in text
-        or "account deactivated" in text
-        or "invalid_api_key" in text
-        or "incorrect api key" in text
-        or "invalid api key" in text
-    )
-
-
 def openai_is_retryable(error):
     text = str(error or "").lower()
     status = getattr(error, "status_code", None)
@@ -277,10 +261,6 @@ async def openai_failover(callback):
     for offset in range(total_keys):
         index = (OPENAI_KEY_INDEX + offset) % total_keys
 
-        # کلیدهای خراب/غیرفعال اصلاً دوباره امتحان نمی‌شوند.
-        if index in OPENAI_DISABLED_KEYS:
-            continue
-
         if OPENAI_KEY_COOLDOWN.get(index, 0) > time.time():
             continue
 
@@ -295,18 +275,6 @@ async def openai_failover(callback):
         except Exception as error:
             last_error = error
 
-            # خطاهای دائمی مثل account_deactivated / invalid_api_key:
-            # این کلید را از چرخه خارج کن و مستقیم سراغ کلید بعدی برو.
-            if openai_is_permanently_invalid(error):
-                OPENAI_DISABLED_KEYS.add(index)
-                OPENAI_KEY_COOLDOWN.pop(index, None)
-                log.error(
-                    "OpenAI key #%s permanently disabled; removed from failover cycle. Error: %s",
-                    index + 1,
-                    error,
-                )
-                continue
-
             if not openai_is_retryable(error):
                 raise
 
@@ -320,12 +288,9 @@ async def openai_failover(callback):
                 index + 1,
             )
 
-    if last_error:
-        disabled_count = len(OPENAI_DISABLED_KEYS)
-        raise RuntimeError(
-            f"تمام کلیدهای OpenAI در دسترس نیستند. {disabled_count} کلید به‌دلیل خطای دائمی از چرخه خارج شده‌اند."
-        ) from last_error
-    raise RuntimeError("تمام کلیدهای OpenAI در حال حاضر در Cooldown یا غیرفعال هستند.")
+    raise RuntimeError(
+        "تمام کلیدهای OpenAI فعلاً محدود، نامعتبر یا در دسترس نیستند."
+    ) from last_error
 
 
 # ============================================================
