@@ -49,9 +49,11 @@ from openai import AsyncOpenAI
 # - Railway friendly
 # ============================================================
 
-BOT_VERSION = "v5.9.1"
-# v5.9.1: no headline word-count limit
+BOT_VERSION = "v5.10.1"
+# v5.10.1: تیتر بدون محدودیت تعداد کلمه
+# طول تیتر فقط با دقت، روانی و ارتباط با خبر کنترل می‌شود.
 HEADLINE_WORD_LIMIT = None
+MAX_NEWS_SENTENCES = 10
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 CHANNEL_ID = os.getenv("CHANNEL_ID", "@Gamefa_official").strip()
@@ -91,7 +93,6 @@ IMAGE_DIR.mkdir(parents=True, exist_ok=True)
 
 ENABLE_MULTI_SOURCE = os.getenv("ENABLE_MULTI_SOURCE", "1").strip().lower() in ("1", "true", "yes", "on")
 ENABLE_HASHTAGS = False  # هشتگ‌ها عمداً در v5.3.1 غیرفعال هستند.
-ENABLE_SPOILER_DETECTION = os.getenv("ENABLE_SPOILER_DETECTION", "1").strip().lower() in ("1", "true", "yes", "on")
 BREAKING_THRESHOLD = float(os.getenv("BREAKING_THRESHOLD", "0.82"))
 QUEUE_ENABLED = os.getenv("QUEUE_ENABLED", "1").strip().lower() in ("1", "true", "yes", "on")
 NEWS_LENGTH = os.getenv("NEWS_LENGTH", "auto").strip()
@@ -106,7 +107,7 @@ queue_lock = asyncio.Lock()
 queue_waiters = {}
 editorial_stats = {
     "processed": 0, "published": 0, "duplicates": 0, "failed": 0,
-    "images_ok": 0, "images_failed": 0, "breaking": 0, "spoilers": 0,
+    "images_ok": 0, "images_failed": 0, "breaking": 0,
     "web_search": 0, "multi_source": 0, "edits": 0, "rewrites": 0,
     "hashtags": 0, "queue_max": 0, "publishing_disabled": 1, "mode_button_disabled": 1
 }
@@ -150,35 +151,6 @@ log = logging.getLogger("gamefa_bot")
 # ============================================================
 # OPENAI
 # ============================================================
-
-# V5.10 compatibility constants (defined before every runtime path)
-V57_MIN_CONFIDENCE = float(os.getenv("V57_MIN_CONFIDENCE", "0.84"))
-V57_EDITOR_THRESHOLD = float(os.getenv("V57_EDITOR_THRESHOLD", "0.86"))
-V57_MAX_VERIFY_OUTPUT = int(os.getenv("V57_MAX_VERIFY_OUTPUT", "1600"))
-V57_MAX_ARCHIVE_FACTS = int(os.getenv("V57_MAX_ARCHIVE_FACTS", "12"))
-V57_REWRITE_ON_VERIFY_FAIL = os.getenv("V57_REWRITE_ON_VERIFY_FAIL", "1").strip().lower() in ("1", "true", "yes", "on")
-
-V57_OFFICIAL_PATTERNS = [
-    "officially announced", "official announcement", "confirmed by", "official statement",
-    "officially confirmed", "announced by", "تأیید رسمی", "به صورت رسمی", "به‌صورت رسمی",
-    "رسماً اعلام", "رسما اعلام", "تأیید کرد", "اعلام کرد", "تأیید شد", "اعلام شد",
-]
-V57_REPORT_PATTERNS = [
-    "according to reports", "reported by", "reportedly", "sources say", "according to",
-    "گزارش شده", "طبق گزارش", "بر اساس گزارش", "منابع می‌گویند", "احتمال", "گفته می‌شود",
-    "شایعه", "rumor", "rumoured", "may", "could", "expected to",
-]
-V57_CLICKBAIT_TERMS = [
-    "باورنکردنی", "باور نکردنی", "شوک", "شوکه", "عجیب", "جنون", "بمب", "ترکاند",
-    "همه را غافلگیر", "با این خبر همه", "نمی‌توانید باور کنید", "هرگز حدس نمی‌زنید",
-    "باورنکردنی است", "shocking", "insane", "unbelievable", "you won't believe",
-]
-V57_SPOILER_TERMS = [
-    "اسپویل", "spoiler", "مرگ", "کشته می‌شود", "قاتل", "پایان", "فینال", "finale",
-    "ending", "death", "dies", "killed", "secret ending", "هویت واقعی",
-]
-
-
 
 def get_openai_client(index: int):
     if index not in OPENAI_CLIENTS:
@@ -1267,7 +1239,9 @@ def title_word_count(title):
 
 
 def valid_title(title):
-    return bool(title) and starts_with_persian(title) and title_word_count(title) <= 8
+    # از v5.10.1 به بعد هیچ سقف کلمه‌ای برای تیتر وجود ندارد.
+    # فقط شروع فارسی و خالی نبودن تیتر بررسی می‌شود.
+    return bool(title) and starts_with_persian(title)
 
 
 def valid_sentence_count(sentences, requested=0):
@@ -1280,10 +1254,6 @@ def valid_sentence_count(sentences, requested=0):
 def local_news_fallback(source, facts, max_sentences=10):
     title = strip_site_branding_from_title(clean_text(source.get("title", "")))
     title = ensure_persian_start(title or "خبر جدید", True)
-    words = re.findall(r"[\w\u0600-\u06FF]+", title)
-    if len(words) > 8:
-        title = " ".join(words[:8]).strip()
-
     pool = []
     for item in facts.get("facts", []):
         if isinstance(item, dict):
@@ -2477,16 +2447,10 @@ def build_custom_post(title, body, source=None, facts=None):
     prefix = ""
     if is_breaking(source or {}, facts or {}):
         prefix = "🚨 "
-    spoiler = ""
-    # هشتگ‌ها در v5.3.1 به‌صورت کامل غیرفعال هستند.
-    # حتی اگر تابع قدیمی make_hashtags در فایل باقی مانده باشد،
-    # هیچ هشتگی وارد متن نهایی خبر نمی‌شود.
-    suffix = ""
-    if spoiler:
-        suffix += "\n\n" + spoiler
+    # هشتگ و برچسب احتمال اسپویل عمداً در v5.10.1 حذف شده‌اند.
     return (
         "<b>" + escape_html(prefix + category + " " + title) + "</b>\n\n"
-        + "🟣 " + escape_html(body) + escape_html(suffix)
+        + "🟣 " + escape_html(body)
         + "\n\n<b>🆔 @Gamefa_official</b>"
     )
 
@@ -2513,7 +2477,6 @@ def editorial_dashboard_text():
         f"❌ ناموفق: <b>{editorial_stats.get('failed',0)}</b>\n"
         f"🖼 تصویر موفق: <b>{editorial_stats.get('images_ok',0)}</b>\n"
         f"🚨 Breaking: <b>{editorial_stats.get('breaking',0)}</b>\n"
-        f"⚠️ Spoiler: <b>{editorial_stats.get('spoilers',0)}</b>\n"
         f"🔎 Web Search: <b>{editorial_stats.get('web_search',0)}</b>\n"
         f"🌐 چندمنبعی: <b>{editorial_stats.get('multi_source',0)}</b>\n"
         f"✏️ اصلاحات: <b>{editorial_stats.get('edits',0)}</b>\n"
@@ -2625,8 +2588,11 @@ async def advanced_process_news(message, text):
         quality = v56_quality_report(source, facts, related)
         structured_log("quality", "editorial quality calculated", confidence=quality["confidence"], category=quality["category"], status=quality["status"])
         breaking = is_breaking(source, facts)
+        spoiler = detect_spoiler(source, facts)
         if breaking:
             stat_inc("breaking")
+        if spoiler:
+            stat_inc("spoilers")
         await status.edit_text("✍️ در حال ساخت نسخه تحریریه...") if status else None
         length = normalize_length(NEWS_LENGTH)
         mode = normalize_mode(WRITING_MODE)
@@ -2636,6 +2602,7 @@ async def advanced_process_news(message, text):
             generated = local_news_fallback(source, facts)
             title, sentences = split_sentences(generated)
         body = " ".join(sentences)
+        title, body = v510_finalize_text(title, body)
         post = build_custom_post(title, body, source, facts)
         post = v56_finalize_post(post, source, facts)
         if not post:
@@ -2814,10 +2781,6 @@ async def handle_editorial_text(message):
         if not new:
             await message.answer("❌ متن خالی است."); return True
         if kind == "title":
-            new_words = re.findall(r"[\w\u0600-\u06FF]+", new)
-            if len(new_words) > 8:
-                item["awaiting_edit"] = kind
-                return True
             item["title"] = ensure_persian_start(new, True)
         else:
             item["body"] = clean_text(new)
@@ -3092,6 +3055,7 @@ def v56_finalize_post(post, source, facts):
     """پاک‌سازی نهایی: استیکر تیتر فقط یکی از سه دسته مجاز باشد و هشتگ حذف شود."""
     title, body = parse_editable_post(post)
     title = re.sub(r"^[🎮🎥📢🎬📱📰🟣🔵🟢🟡🟠⚪⚫🚨\s]+", "", title).strip()
+    # v5.10.1: تیتر دیگر به ۸ کلمه محدود نیست.
     category = detect_category(title + " " + body, facts)
     title = f"{category} {title}"
     body = re.sub(r"(?<!\w)#[\w\u0600-\u06FF-]+", "", body)
@@ -3099,11 +3063,11 @@ def v56_finalize_post(post, source, facts):
     return "<b>" + escape_html(title) + "</b>\n\n🟣 " + escape_html(body) + "\n\n<b>🆔 @Gamefa_official</b>"
 
 # ============================================================
-# END V5.8.0 PRECISION EDITORIAL ENGINE
+# END V5.10.1 PRECISION EDITORIAL ENGINE
 # ============================================================
 
 # ============================================================
-# V5.8.0 PRECISION EDITORIAL ENGINE
+# V5.10.1 PRECISION EDITORIAL ENGINE
 # ============================================================
 # 15 قابلیت اصلی:
 # 1) استخراج واقعیت قبل از نگارش
@@ -3122,6 +3086,33 @@ def v56_finalize_post(post, source, facts):
 # 14) Breaking News با شواهد
 # 15) کنترل نهایی و انتشار فقط در حالت آماده
 # ============================================================
+
+V57_MIN_CONFIDENCE = float(os.getenv("V57_MIN_CONFIDENCE", "0.84"))
+V57_EDITOR_THRESHOLD = float(os.getenv("V57_EDITOR_THRESHOLD", "0.86"))
+V57_MAX_VERIFY_OUTPUT = int(os.getenv("V57_MAX_VERIFY_OUTPUT", "1600"))
+V57_MAX_ARCHIVE_FACTS = int(os.getenv("V57_MAX_ARCHIVE_FACTS", "12"))
+V57_REWRITE_ON_VERIFY_FAIL = os.getenv("V57_REWRITE_ON_VERIFY_FAIL", "1").strip().lower() in ("1", "true", "yes", "on")
+
+V57_OFFICIAL_PATTERNS = [
+    "officially announced", "official announcement", "confirmed by", "official statement",
+    "officially confirmed", "announced by", "تأیید رسمی", "به صورت رسمی", "به‌صورت رسمی",
+    "رسماً اعلام", "رسما اعلام", "تأیید کرد", "اعلام کرد", "تأیید شد", "اعلام شد",
+]
+V57_REPORT_PATTERNS = [
+    "according to reports", "reported by", "reportedly", "sources say", "according to",
+    "گزارش شده", "طبق گزارش", "بر اساس گزارش", "منابع می‌گویند", "احتمال", "گفته می‌شود",
+    "شایعه", "rumor", "rumoured", "may", "could", "expected to",
+]
+V57_CLICKBAIT_TERMS = [
+    "باورنکردنی", "باور نکردنی", "شوک", "شوکه", "عجیب", "جنون", "بمب", "ترکاند",
+    "همه را غافلگیر", "با این خبر همه", "نمی‌توانید باور کنید", "هرگز حدس نمی‌زنید",
+    "باورنکردنی است", "shocking", "insane", "unbelievable", "you won't believe",
+]
+V57_SPOILER_TERMS = [
+    "اسپویل", "spoiler", "مرگ", "کشته می‌شود", "قاتل", "پایان", "فینال", "finale",
+    "ending", "death", "dies", "killed", "secret ending", "هویت واقعی",
+]
+
 
 def v57_numbers(text):
     text = text or ""
@@ -3307,7 +3298,7 @@ V57_VERIFY_PROMPT="""
 6) اگر جمله‌ای اطلاعات تازه و بدون پشتوانه دارد، hallucination=true.
 7) اگر اشکال وجود دارد، نسخه اصلاح‌شده کوتاه از تیتر و بدنه را پیشنهاد بده؛ اطلاعات جدید اضافه نکن.
 8) خروجی فقط JSON معتبر با کلیدهای زیر باشد:
-{"pass":true,"score":0.0,"hallucination":false,"official_claim_ok":true,"numbers_ok":true,"dates_ok":true,"title_ok":true,"clickbait":0.0,"spoiler":"بدون اسپویل","issues":[],"corrected_title":"","corrected_body":""}
+{"pass":true,"score":0.0,"hallucination":false,"official_claim_ok":true,"numbers_ok":true,"dates_ok":true,"title_ok":true,"clickbait":0.0,"issues":[],"corrected_title":"","corrected_body":""}
 """
 
 
@@ -3332,7 +3323,7 @@ async def v57_verify_draft(source, facts, title, body, related=None):
         data=json.loads(raw[start:end+1])
         if not isinstance(data,dict):
             raise ValueError("خروجی ویراستار دیکشنری نیست")
-        for key,default in (("pass",False),("score",0.0),("hallucination",True),("official_claim_ok",False),("numbers_ok",False),("dates_ok",False),("title_ok",False),("clickbait",audit["clickbait"]),("spoiler",audit["spoiler"]),("issues",[]),("corrected_title",""),("corrected_body","")):
+        for key,default in (("pass",False),("score",0.0),("hallucination",True),("official_claim_ok",False),("numbers_ok",False),("dates_ok",False),("title_ok",False),("clickbait",audit["clickbait"]),("issues",[]),("corrected_title",""),("corrected_body","")):
             data.setdefault(key,default)
         data["local_audit"]=audit
         data["score"]=max(0.0,min(1.0,float(data.get("score",0) or 0)))
@@ -3346,7 +3337,7 @@ async def v57_verify_draft(source, facts, title, body, related=None):
             "pass":safe,"score":audit["confidence"],"hallucination":not safe,
             "official_claim_ok":audit["status"]!="نامشخص","numbers_ok":audit["numbers_ok"],
             "dates_ok":audit["dates_ok"],"title_ok":audit["title_match"]>=0.35,
-            "clickbait":audit["clickbait"],"spoiler":audit["spoiler"],
+            "clickbait":audit["clickbait"],
             "issues":["ویراستار دوم در دسترس نبود؛ ممیزی محلی اعمال شد."],
             "corrected_title":"","corrected_body":"","local_audit":audit
         }
@@ -3378,7 +3369,6 @@ def v57_quality_panel(audit, verify):
         f"🏷 وضعیت خبر: <b>{escape_html(str(audit.get('status','نامشخص')))}</b>\n"
         f"🎯 تیتر: <b>{'✅' if verify.get('title_ok') else '⚠️'}</b>\n"
         f"🚫 Clickbait: <b>{int(float(audit.get('clickbait',0))*100)}/100</b>\n"
-        f"⚠️ Spoiler: <b>{escape_html(str(audit.get('spoiler','بدون اسپویل')))}</b>\n"
         f"♻️ تناقض آرشیو: <b>{conflicts}</b>\n"
         f"🌐 منابع مرتبط: <b>{audit.get('related_sources',0)}</b>\n"
         f"\n{status}\n"
@@ -3454,7 +3444,7 @@ async def v57_process_news(message, text):
                     title,body=ct," ".join(cs)
                     verify=await v57_verify_draft(source,facts,title,body,related)
             except Exception as error:
-                log.warning("V5.7 corrective rewrite failed: %s",error)
+                log.warning("V5.10 corrective rewrite failed: %s",error)
         audit=verify.get("local_audit") or v57_build_audit(source,facts,title,body,related)
         # قفل قطعی اعداد: اگر متن نهایی عددی از منبع دارد که در FACTS نیست، بازنویسی اجباری/رد.
         source_numbers=set(v57_numbers(source.get("title","")+" "+source.get("body","")))
@@ -3468,6 +3458,7 @@ async def v57_process_news(message, text):
         if v57_status(source,facts)=="نامشخص" and any(x in norm(title) for x in [norm("رسمی"),norm("تأیید شد"),norm("اعلام شد")]):
             verify["pass"]=False
             verify.setdefault("issues",[]).append("ادعای رسمی بدون شاهد کافی است.")
+        title, body = v510_finalize_text(title, body)
         post=build_custom_post(title,body,source,facts)
         post=v56_finalize_post(post,source,facts)
         if not post:
@@ -3480,7 +3471,7 @@ async def v57_process_news(message, text):
             "hash":text_hash(duplicate_text),"title":source.get("title","")[:500],
             "source":duplicate_text[:25000],"post":post,"url":url or "",
             "domain":source.get("domain",""),"breaking":bool(audit.get("breaking")),
-            "spoiler":audit.get("spoiler"),"mode":mode,"length":length,
+            "mode":mode,"length":length,
             "related_sources":related,"quality":audit,"v57_verify":verify,
             "facts_memory":facts.get("v57_memory",{}),"created_at":int(time.time()),
         })
@@ -3553,7 +3544,7 @@ advanced_process_news=v57_process_news
 
 V59_MAX_SENTENCES = 10
 V59_MIN_SENTENCES = 1
-V59_MAX_TITLE_WORDS = 8
+V59_MAX_TITLE_WORDS = None
 V59_IMPORTANCE_KEYWORDS = {
     "high": [
         "تاریخ انتشار", "تاریخ اکران", "رسماً", "تأیید شد", "تایید شد",
@@ -3774,8 +3765,6 @@ def v59_final_prose(title, body):
 def v59_validate(title, sentences, source, facts, related_archive=None):
     if not title or not sentences or len(sentences) > V59_MAX_SENTENCES:
         return False, ["طول خروجی نامعتبر است"]
-    if title_word_count(title) > V59_MAX_TITLE_WORDS:
-        return False, ["تیتر بیش از ۸ کلمه است"]
     if not starts_with_persian(title):
         return False, ["تیتر باید با فارسی شروع شود"]
     if any(not starts_with_persian(x) for x in sentences):
@@ -3891,6 +3880,7 @@ async def v59_process_news(message, text):
 
         final_conf = float(verify.get("score", audit.get("confidence", 0.0)) or 0.0)
         ready = bool(verify.get("pass")) and final_conf >= V57_MIN_CONFIDENCE and not conflicts
+        title, body = v510_finalize_text(title, body)
         post = build_custom_post(title, body, source, facts)
         post = v56_finalize_post(post, source, facts)
         if not post:
@@ -3904,7 +3894,7 @@ async def v59_process_news(message, text):
             "hash": text_hash(duplicate_text), "title": source.get("title", "")[:500],
             "source": duplicate_text[:25000], "post": post, "url": url or "",
             "domain": source.get("domain", ""), "breaking": breaking,
-            "spoiler": spoiler, "mode": mode, "length": len(sentences),
+            "mode": mode, "length": len(sentences),
             "adaptive_importance": importance, "update_mode": update_mode,
             "related_sources": related, "related_archive": related_archive,
             "quality": audit, "v59_verify": verify,
@@ -3940,7 +3930,7 @@ async def v59_process_news(message, text):
         await message.answer("✅ <b>خبر آماده بررسی تحریریه است.</b>" + panel, parse_mode=ParseMode.HTML, reply_markup=main_keyboard())
     except Exception as error:
         stat_inc("failed")
-        log.exception("V5.9 news processing error")
+        log.exception("V5.10.1 news processing error")
         if status:
             try: await status.delete()
             except Exception: pass
@@ -3949,9 +3939,84 @@ async def v59_process_news(message, text):
         processing_users.discard(user_id)
 
 
-# v5.9 موتور اصلی
+# v5.10.1 موتور اصلی
 process_news = v59_process_news
 advanced_process_news = v59_process_news
+
+
+# ============================================================
+# V5.10.1 PRECISION + NATURAL NEWS ENGINE
+# ============================================================
+# این لایه روی موتور قبلی اضافه شده و چیزی از pipeline قبلی حذف نمی‌کند.
+# اهداف:
+# 1) تیتر آزاد از محدودیت ۸ کلمه
+# 2) متن خودکار و فشرده، بین ۱ تا ۱۰ جمله
+# 3) حذف تکرار و جمله‌های کم‌ارزش
+# 4) حفظ اعداد، تاریخ‌ها و اسامی مهم
+# 5) جلوگیری از شروع انگلیسی جمله‌ها
+# 6) حفظ سه دسته رسمی Gamefa
+# 7) عدم تولید هشتگ
+# 8) عدم نمایش گزینه احتمال اسپویل
+# ============================================================
+
+V510_MIN_SENTENCES = 1
+V510_MAX_SENTENCES = 10
+V510_MAX_TITLE_CHARS = int(os.getenv("V510_MAX_TITLE_CHARS", "220"))
+V510_MIN_TITLE_CHARS = int(os.getenv("V510_MIN_TITLE_CHARS", "8"))
+
+
+def v510_sentence_key(sentence):
+    text = norm(clean_sentence(sentence))
+    text = re.sub(r"[^\w\u0600-\u06FF ]+", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def v510_remove_duplicate_sentences(sentences):
+    result = []
+    seen = set()
+    for sentence in sentences or []:
+        sentence = clean_sentence(sentence)
+        key = v510_sentence_key(sentence)
+        if not key or key in seen:
+            continue
+        # حذف جمله‌ای که تقریباً همان جمله قبلی است.
+        words = set(key.split())
+        duplicate = False
+        for previous in result[-3:]:
+            pwords = set(v510_sentence_key(previous).split())
+            if words and pwords:
+                overlap = len(words & pwords) / max(1, min(len(words), len(pwords)))
+                if overlap >= 0.90:
+                    duplicate = True
+                    break
+        if not duplicate:
+            result.append(sentence)
+            seen.add(key)
+    return result[:V510_MAX_SENTENCES]
+
+
+def v510_compact_title(title):
+    title = strip_site_branding_from_title(clean_sentence(title or ""))
+    title = re.sub(r"^[🎮🎥📢🎬📱📰🟣🔵🟢🟡🟠⚪⚫🚨\s]+", "", title).strip()
+    title = ensure_persian_start(title or "خبر جدید", True)
+    if len(title) > V510_MAX_TITLE_CHARS:
+        title = title[:V510_MAX_TITLE_CHARS].rsplit(" ", 1)[0].rstrip("،:؛-")
+    return title
+
+
+def v510_compact_body(body):
+    sentences = split_sentences(clean_text(body or ""))[1]
+    sentences = [ensure_persian_start(clean_sentence(x), False) for x in sentences if clean_sentence(x)]
+    sentences = v510_remove_duplicate_sentences(sentences)
+    return " ".join(sentences[:V510_MAX_SENTENCES])
+
+
+def v510_finalize_text(title, body):
+    title = v510_compact_title(title)
+    body = v510_compact_body(body)
+    if len(title) < V510_MIN_TITLE_CHARS:
+        title = ensure_persian_start(title or "خبر جدید", True)
+    return title, body
 
 
 # ============================================================
