@@ -36,7 +36,7 @@ from openai import AsyncOpenAI
 
 
 # ============================================================
-# GAMEFA BOT v5.13.0
+# GAMEFA BOT v5.11.0
 # ============================================================
 # امکانات:
 # - پشتیبانی از لینک Gamefa و سایت‌های خبری دیگر
@@ -49,7 +49,7 @@ from openai import AsyncOpenAI
 # - Railway friendly
 # ============================================================
 
-BOT_VERSION = "v5.13.0"
+BOT_VERSION = "v5.11.0"
 # v5.11.0: تیتر بدون محدودیت تعداد کلمه
 # طول تیتر فقط با دقت، روانی و ارتباط با خبر کنترل می‌شود.
 HEADLINE_WORD_LIMIT = None
@@ -100,17 +100,6 @@ WRITING_MODE = os.getenv("WRITING_MODE", "standard").strip().lower()
 LEARNING_FILE = Path(os.getenv("LEARNING_FILE", "editorial_learning.json"))
 STATS_FILE = Path(os.getenv("STATS_FILE", "editorial_stats.json"))
 MAX_QUEUE = int(os.getenv("MAX_QUEUE", "20"))
-
-# ============================================================
-# V5.12 GAMEFA BRAIN / FACT CHECK / STORY MEMORY
-# ============================================================
-ENABLE_FACT_CHECK = os.getenv("ENABLE_FACT_CHECK", "1").strip().lower() in ("1", "true", "yes", "on")
-FACT_CHECK_MIN_CONFIDENCE = float(os.getenv("FACT_CHECK_MIN_CONFIDENCE", "0.82"))
-ENABLE_RUMOR_DETECTION = os.getenv("ENABLE_RUMOR_DETECTION", "1").strip().lower() in ("1", "true", "yes", "on")
-ENABLE_STORY_MEMORY = os.getenv("ENABLE_STORY_MEMORY", "1").strip().lower() in ("1", "true", "yes", "on")
-STORY_SIMILARITY_THRESHOLD = float(os.getenv("STORY_SIMILARITY_THRESHOLD", "0.48"))
-ENABLE_GAMEFA_WRITING_DNA = os.getenv("ENABLE_GAMEFA_WRITING_DNA", "1").strip().lower() in ("1", "true", "yes", "on")
-ENABLE_STRICT_VALIDATOR = os.getenv("ENABLE_STRICT_VALIDATOR", "1").strip().lower() in ("1", "true", "yes", "on")
 
 # ============================================================
 # V5.11 AI EDITOR / QUALITY / MEMORY SETTINGS
@@ -169,39 +158,6 @@ OPENAI_CLIENTS = {}
 OPENAI_KEY_INDEX = 0
 OPENAI_KEY_COOLDOWN = {}
 
-# وضعیت کلیدهای دائماً خراب با هش ذخیره می‌شود تا خود API Key هرگز روی دیسک نوشته نشود.
-OPENAI_DISABLED_KEYS = set()
-OPENAI_DISABLED_KEY_HASHES = set()
-OPENAI_KEY_STATE_FILE = Path(os.getenv("OPENAI_KEY_STATE_FILE", "openai_key_state.json"))
-
-def _openai_key_hash(key):
-    return hashlib.sha256((key or "").encode("utf-8")).hexdigest()
-
-def load_openai_key_state():
-    global OPENAI_DISABLED_KEY_HASHES, OPENAI_DISABLED_KEYS
-    try:
-        if not OPENAI_KEY_STATE_FILE.exists():
-            return
-        raw = json.loads(OPENAI_KEY_STATE_FILE.read_text(encoding="utf-8"))
-        hashes = raw.get("disabled_key_hashes", []) if isinstance(raw, dict) else []
-        if isinstance(hashes, list):
-            OPENAI_DISABLED_KEY_HASHES = {str(x) for x in hashes if x}
-        OPENAI_DISABLED_KEYS = {
-            i for i, key in enumerate(OPENAI_KEYS)
-            if _openai_key_hash(key) in OPENAI_DISABLED_KEY_HASHES
-        }
-    except Exception as error:
-        log.warning("OpenAI key state load error: %s", error)
-
-def save_openai_key_state():
-    try:
-        OPENAI_KEY_STATE_FILE.write_text(
-            json.dumps({"disabled_key_hashes": sorted(OPENAI_DISABLED_KEY_HASHES)}, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-    except Exception as error:
-        log.warning("OpenAI key state save error: %s", error)
-
 memory = []
 prepared = {}
 processing_users = set()
@@ -211,7 +167,6 @@ logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(message)s",
 )
 log = logging.getLogger("gamefa_bot")
-load_openai_key_state()
 
 
 # ============================================================
@@ -257,20 +212,6 @@ def openai_retry_seconds(error):
     return 60.0
 
 
-def openai_is_permanently_invalid(error):
-    """Return True when the current key should be removed from failover."""
-    text = str(error or "").lower()
-    status = getattr(error, "status_code", None)
-    return (
-        status == 401
-        or "account_deactivated" in text
-        or "account deactivated" in text
-        or "invalid_api_key" in text
-        or "incorrect api key" in text
-        or "invalid api key" in text
-    )
-
-
 def openai_is_retryable(error):
     text = str(error or "").lower()
     status = getattr(error, "status_code", None)
@@ -298,16 +239,10 @@ def openai_is_retryable(error):
 
 
 async def openai_failover(callback):
-    global OPENAI_KEY_INDEX, OPENAI_DISABLED_KEYS
+    global OPENAI_KEY_INDEX
 
     if not OPENAI_KEYS:
         raise RuntimeError("هیچ کلید OpenAI تنظیم نشده است.")
-
-    # وضعیت دائمی را بر اساس هش کلیدها دوباره به index نگاشت می‌کنیم.
-    OPENAI_DISABLED_KEYS = {
-        i for i, key in enumerate(OPENAI_KEYS)
-        if _openai_key_hash(key) in OPENAI_DISABLED_KEY_HASHES
-    }
 
     last_error = None
     total_keys = len(OPENAI_KEYS)
@@ -315,15 +250,13 @@ async def openai_failover(callback):
     for offset in range(total_keys):
         index = (OPENAI_KEY_INDEX + offset) % total_keys
 
-        if index in OPENAI_DISABLED_KEYS:
-            continue
-
         if OPENAI_KEY_COOLDOWN.get(index, 0) > time.time():
             continue
 
         try:
             client = get_openai_client(index)
             result = await callback(client)
+
             OPENAI_KEY_INDEX = (index + 1) % total_keys
             OPENAI_KEY_COOLDOWN.pop(index, None)
             return result
@@ -331,27 +264,22 @@ async def openai_failover(callback):
         except Exception as error:
             last_error = error
 
-            if openai_is_permanently_invalid(error):
-                OPENAI_DISABLED_KEYS.add(index)
-                OPENAI_DISABLED_KEY_HASHES.add(_openai_key_hash(OPENAI_KEYS[index]))
-                OPENAI_KEY_COOLDOWN.pop(index, None)
-                save_openai_key_state()
-                log.error(
-                    "OpenAI key #%s permanently disabled and removed from failover: %s",
-                    index + 1, error,
-                )
-                continue
-
             if not openai_is_retryable(error):
                 raise
 
             wait = openai_retry_seconds(error)
-            OPENAI_KEY_COOLDOWN[index] = time.time() + min(max(float(wait), 30.0), 1800.0)
-            log.warning("OpenAI key #%s temporarily unavailable; trying next key.", index + 1)
+            OPENAI_KEY_COOLDOWN[index] = time.time() + min(
+                max(wait, 30), 1800
+            )
 
-    if last_error:
-        raise RuntimeError("هیچ کلید فعال OpenAI در این تلاش پاسخ موفق نداد.") from last_error
-    raise RuntimeError("تمام کلیدهای OpenAI غیرفعال یا در Cooldown هستند.")
+            log.warning(
+                "OpenAI key #%s unavailable; trying another key.",
+                index + 1,
+            )
+
+    raise RuntimeError(
+        "تمام کلیدهای OpenAI فعلاً محدود، نامعتبر یا در دسترس نیستند."
+    ) from last_error
 
 
 # ============================================================
@@ -1434,16 +1362,6 @@ FORBIDDEN_OUTPUT_TERMS = [
     "متن کامل مقاله",
     "در این صفحه",
     "fact",
-    "نظر شما",
-    "نظر شما چیست",
-    "نظرتان",
-    "به نظر شما",
-    "در ادامه بخوانید",
-    "ادامه این مطلب",
-    "برای اطلاعات بیشتر",
-    "لینک خبر",
-    "منبع:",
-    "منابع:",
 ]
 
 
@@ -1471,28 +1389,8 @@ def validate_generated_output(generated):
     return True
 
 
-def sanitize_ai_output(generated):
-    """خروجی AI را به تیتر + یک پاراگراف خبری محدود می‌کند."""
-    raw = clean_ai_text(generated or "")
-    raw = re.sub(r"```(?:text|markdown|html)?", "", raw, flags=re.I).replace("```", "")
-    lines = [clean_text(x) for x in raw.splitlines() if clean_text(x)]
-    if not lines:
-        return ""
-    title = lines[0]
-    body = clean_text(" ".join(lines[1:]))
-    for pattern in (
-        r"(?:نظر شما(?: درباره این خبر)?(?: چیست)?[؟?]?).*$",
-        r"(?:به نظر شما.*[؟?]).*$",
-        r"(?:نظرتان.*[؟?]).*$",
-        r"(?:برای اطلاعات بیشتر.*)$",
-        r"(?:ادامه این مطلب.*)$",
-    ):
-        body = re.sub(pattern, "", body, flags=re.I).strip()
-    body = re.sub(r"(?<!\w)#[\w\u0600-\u06FF-]+", "", body).strip()
-    return title + ("\n" + body if body else "")
-
 def format_post(generated):
-    generated = sanitize_ai_output(generated)
+    generated = clean_ai_text(generated)
 
     title, sentences = split_sentences(generated)
 
@@ -1871,6 +1769,10 @@ async def process_news(message, text):
                 reply_markup=None,
             )
 
+        await message.answer(
+            "✅ خبر آماده انتشار است.",
+            reply_markup=main_keyboard(),
+        )
 
     except Exception as error:
         log.exception("News processing error")
@@ -4153,7 +4055,7 @@ def v510_finalize_text(title, body):
 
 
 # ============================================================
-# V5.12.0 — GAMEFA BRAIN
+# V5.11.0 — NEXT-GEN GAMEFA AI EDITOR
 # ============================================================
 
 def cosine_similarity(a, b):
@@ -4425,108 +4327,6 @@ score بین 0 و 1.
         return {"score":0.78,"pass":False,"issues":["ویراستار هوشمند در دسترس نبود؛ کنترل محافظه‌کارانه اعمال شد."]}
 
 
-
-GAMEFA_WRITING_DNA = """
-سبک نوشتاری Gamefa:
-- فارسی طبیعی، خبری و روان؛ شبیه نوشته یک دبیر انسانی.
-- بدون ترجمه تحت‌اللفظی، مقدمه‌چینی و جمله‌های پرکننده.
-- مهم‌ترین اتفاق در ابتدای بدنه بیاید.
-- متن یک پاراگراف، فشرده و دقیق باشد.
-- نام‌های انگلیسی حفظ شوند، اما جمله با واژه انگلیسی شروع نشود.
-- از «لازم به ذکر است»، «در همین راستا»، «این موضوع می‌تواند» و عبارت‌های کلیشه‌ای مشابه استفاده نشود.
-- هیچ نظر شخصی، سؤال از مخاطب، CTA، هشتگ، لینک یا جمع‌بندی مصنوعی اضافه نشود.
-- هیچ واقعیت، عدد، تاریخ، نام یا علت جدیدی ساخته نشود.
-"""
-
-
-def v512_claim_texts(facts):
-    out=[]
-    for item in (facts or {}).get("facts", []) if isinstance(facts, dict) else []:
-        if isinstance(item, dict):
-            text=clean_text(str(item.get("fact", "")))
-            if text: out.append(text)
-    return out
-
-
-def v512_status(source, facts):
-    """وضعیت داخلی خبر؛ هرگز در پست نهایی نمایش داده نمی‌شود."""
-    blob=norm(" ".join([source.get("title",""), source.get("description",""), source.get("body","")[:9000], json.dumps(facts or {}, ensure_ascii=False)]))
-    rumor=any(x in blob for x in ["rumor","rumour","شایعه","گفته می‌شود","ظاهراً","احتمالاً","گزارش شده"])
-    official=any(x in blob for x in ["official","confirmed","تایید رسمی","تأیید رسمی","رسماً","اعلام رسمی"])
-    reported=any(x in blob for x in ["according to","گزارش","منابع آگاه","به گفته","طبق گزارش"])
-    if rumor and not official: return "شایعه"
-    if official: return "رسمی"
-    if reported: return "گزارش‌شده"
-    return "نامشخص"
-
-
-def v512_story_memory(source, facts):
-    if not ENABLE_STORY_MEMORY: return []
-    current=norm(" ".join([source.get("title",""), str((facts or {}).get("main_event","")), " ".join(v57_entities(facts)) if "v57_entities" in globals() else ""]))
-    if not current: return []
-    matches=[]
-    for item in memory[-MAX_MEMORY:]:
-        old=norm(" ".join([str(item.get("title","")), str(item.get("source",""))[:5000], str(item.get("story_id",""))]))
-        sim=word_similarity(current, old)
-        if sim >= STORY_SIMILARITY_THRESHOLD:
-            matches.append((sim,item))
-    matches.sort(key=lambda x:x[0], reverse=True)
-    return matches[:5]
-
-
-def v512_story_id(source, facts, matches):
-    if matches and matches[0][1].get("story_id"):
-        return str(matches[0][1]["story_id"])
-    seed=norm(" ".join([source.get("title",""), str((facts or {}).get("main_event",""))]))
-    return "STORY-" + hashlib.sha1(seed.encode("utf-8")).hexdigest()[:10].upper()
-
-
-async def v512_fact_check(source, facts, title, body, related):
-    if not ENABLE_FACT_CHECK or not OPENAI_KEYS:
-        return {"pass": True, "confidence": 0.86, "issues": [], "status": v512_status(source,facts)}
-    prompt="""
-تو Fact Checker تحریریه Gamefa هستی. پیش‌نویس را فقط با FACTS، متن منبع و منابع مرتبط مقایسه کن.
-هر ادعا باید پشتوانه مستقیم داشته باشد. اگر ادعایی در منبع/FACTS نیست، آن را ساختگی یا بدون پشتوانه در نظر بگیر.
-وضعیت رسمی/گزارش‌شده/شایعه را نیز بررسی کن.
-فقط JSON بده:
-{"pass":true,"confidence":0.0,"status":"رسمی|گزارش‌شده|شایعه|نامشخص","issues":[],"unsupported_claims":[],"critical_errors":[]}
-هیچ متن توضیحی خارج از JSON نده.
-"""
-    try:
-        response=await openai_failover(lambda client: client.responses.create(
-            model=MODEL,instructions=prompt,
-            input="FACTS:\n"+json.dumps(facts,ensure_ascii=False)+"\n\nSOURCE:\n"+source.get("body","")[:AI_SOURCE_LIMIT]+"\n\nDRAFT:\n"+title+"\n"+body+"\n\nRELATED:\n"+json.dumps(related or [],ensure_ascii=False)[:7000],
-            max_output_tokens=900))
-        raw=(response.output_text or "").strip(); a,b=raw.find("{"),raw.rfind("}")
-        if a<0 or b<0: raise ValueError("Fact Check JSON invalid")
-        data=json.loads(raw[a:b+1])
-        conf=max(0,min(1,float(data.get("confidence",0) or 0)))
-        issues=data.get("issues",[]) if isinstance(data.get("issues",[]),list) else []
-        unsupported=data.get("unsupported_claims",[]) if isinstance(data.get("unsupported_claims",[]),list) else []
-        critical=data.get("critical_errors",[]) if isinstance(data.get("critical_errors",[]),list) else []
-        passed=bool(data.get("pass")) and conf>=FACT_CHECK_MIN_CONFIDENCE and not critical and not unsupported
-        return {"pass":passed,"confidence":conf,"status":clean_text(str(data.get("status") or v512_status(source,facts))),"issues":issues,"unsupported_claims":unsupported,"critical_errors":critical}
-    except Exception as e:
-        log.warning("V5.12 Fact Check failed: %s",e)
-        return {"pass":False,"confidence":0.0,"status":v512_status(source,facts),"issues":["Fact Check در دسترس نبود"],"unsupported_claims":[],"critical_errors":[]}
-
-
-def v512_strict_validate(title, body, source, facts, fact_check=None):
-    issues=[]
-    if not title or not starts_with_persian(title): issues.append("تیتر نامعتبر")
-    sentences=[x for x in re.split(r"(?<=[.!؟])\s+", body.strip()) if x.strip()]
-    if not 1 <= len(sentences) <= MAX_NEWS_SENTENCES: issues.append("تعداد جملات نامعتبر")
-    if any(not starts_with_persian(clean_sentence(x)) for x in sentences): issues.append("شروع فارسی رعایت نشده")
-    banned=["نظر شما", "نظر شما چیست", "به نظر شما", "لایک", "کامنت", "بیشتر بخوانید", "منبع:", "منابع:", "ai editor", "gamefa ai", "امتیاز سردبیر", "امتیاز جذابیت"]
-    combined=norm(title+" "+body)
-    for x in banned:
-        if norm(x) in combined: issues.append("متن اضافی/تعامل مخاطب")
-    if re.search(r"#\w+", body): issues.append("هشتگ غیرمجاز")
-    if "🆔" in body or "@Gamefa_official" in body: issues.append("شناسه کانال داخل بدنه")
-    if fact_check and not fact_check.get("pass"): issues.extend(fact_check.get("issues",[])[:3])
-    return not issues, issues
-
-
 async def v511_process_news(message, text):
     """موتور یکپارچه v5.11؛ بدون Preview و بدون Hot-News Queue UI."""
     user_id=message.from_user.id
@@ -4562,24 +4362,13 @@ async def v511_process_news(message, text):
         facts["v511"]={"semantic_duplicate_checked":True}
         related=await multi_source_research(source)
         source["related_sources"]=related
-        story_matches=v512_story_memory(source,facts)
         related_archive=v59_related_archive(source,facts) if "v59_related_archive" in globals() else []
         conflicts=v57_archive_conflicts(source,facts) if "v57_archive_conflicts" in globals() else []
-        story_id=v512_story_id(source,facts,story_matches)
 
         if status: await status.edit_text("🎯 مرحله ۳/۸ — امتیاز اهمیت و جذابیت...")
         mode=normalize_mode(WRITING_MODE)
         importance=v59_importance(source,facts,related) if "v59_importance" in globals() else {"score":60,"target":5}
         generated,_,update_mode=await v59_generate(source,facts,related,related_archive,mode)
-        if ENABLE_GAMEFA_WRITING_DNA:
-            # بازنویسی سبک فقط در صورت نیاز؛ بدون افزودن اطلاعات جدید.
-            dna_prompt=V59_NEWS_PROMPT+"\n"+GAMEFA_WRITING_DNA+"\nخروجی فقط تیتر و یک پاراگراف باشد."
-            try:
-                dna_resp=await openai_failover(lambda client: client.responses.create(model=MODEL,instructions=dna_prompt,input="FACTS LOCKED:\n"+json.dumps(facts,ensure_ascii=False)+"\n\nDRAFT:\n"+generated,max_output_tokens=1600))
-                dna_text=(dna_resp.output_text or "").strip()
-                if dna_text: generated=dna_text
-            except Exception as dna_error:
-                log.warning("Writing DNA failed: %s", dna_error)
         title,sentences=split_sentences(generated)
         title, sentences = v59_final_prose(title," ".join(sentences))
         if not title or not sentences:
@@ -4628,27 +4417,10 @@ async def v511_process_news(message, text):
                 if editor2["pass"]:
                     editor=editor2
 
-        fact_check=await v512_fact_check(source,facts,title,body,related)
-        if not fact_check.get("pass"):
-            correction_prompt=V59_NEWS_PROMPT+"\n"+GAMEFA_WRITING_DNA+"\nاصلاحات Fact Check را اعمال کن و هیچ ادعای بدون پشتوانه اضافه نکن.\n"+json.dumps(fact_check.get("issues",[])+fact_check.get("unsupported_claims",[])+fact_check.get("critical_errors",[]),ensure_ascii=False)
-            try:
-                response=await openai_failover(lambda client: client.responses.create(model=MODEL,instructions=correction_prompt,input="FACTS LOCKED:\n"+json.dumps(facts,ensure_ascii=False)+"\n\nDRAFT:\n"+title+"\n"+body,max_output_tokens=1600))
-                corrected=(response.output_text or "").strip()
-                ct,cs=split_sentences(corrected)
-                ct,cs=v59_final_prose(ct," ".join(cs))
-                if ct and cs:
-                    title,body=v510_finalize_text(ct," ".join(cs))
-                    fact_check=await v512_fact_check(source,facts,title,body,related)
-            except Exception as fc_error:
-                log.warning("Fact correction failed: %s",fc_error)
-
-        strict_ok,strict_issues=v512_strict_validate(title,body,source,facts,fact_check)
-        if ENABLE_STRICT_VALIDATOR and not strict_ok:
-            raise RuntimeError("اعتبارسنجی نهایی خبر ناموفق بود: " + " | ".join(strict_issues[:4]))
         if not body:
             raise RuntimeError("کنترل کیفیت اجازه ارسال متن خالی را نداد.")
 
-        if status: await status.edit_text("🖼 مرحله ۶/۸ — انتخاب بهترین تصویر...")
+        if status: await status.edit_text("🖼 مرحله ۶/۸ — امتیازدهی و انتخاب بهترین تصویر...")
         image_path=await smart_image_download_v511(source)
         image_score=float(source.get("selected_image_score",0) or 0)
         breaking=is_breaking(source,facts)
@@ -4675,7 +4447,7 @@ async def v511_process_news(message, text):
             "post":post,"url":url or "","domain":source.get("domain",""),
             "breaking":breaking,"spoiler":spoiler,"mode":mode,"length":len(split_sentences(title+"\n"+body)[1]),
             "importance":importance,"news_score":news_score,"editor_score":editor.get("score",0),
-            "related_sources":related,"related_archive":related_archive,"conflicts":conflicts,"story_id":story_id,"story_update":bool(story_matches),"fact_check":fact_check,"writing_dna":ENABLE_GAMEFA_WRITING_DNA,
+            "related_sources":related,"related_archive":related_archive,"conflicts":conflicts,
             "facts_memory":facts.get("v57_memory",{}),"created_at":int(time.time()),
         })
         memory[:]=memory[-MAX_MEMORY:]
@@ -4684,8 +4456,8 @@ async def v511_process_news(message, text):
         prepared[user_id]={"text":post,"image":str(image_path) if image_path else "",
             "source":source,"facts":facts,"title":title,"body":body,"mode":mode,
             "length":len(split_sentences(title+"\n"+body)[1]),"quality":local_audit,
-            "editor":editor,"news_score":news_score,"image_score":image_score,"fact_check":fact_check,"story_id":story_id,
-            "breaking":breaking,"spoiler":spoiler,"engagement":""}
+            "editor":editor,"news_score":news_score,"image_score":image_score,
+            "breaking":breaking,"spoiler":spoiler,"engagement":engagement}
 
         if status:
             try: await status.delete()
@@ -4718,7 +4490,7 @@ async def debug_command_v511(message: Message):
     if not is_admin(message): return
     results=await v56_health_check()
     await message.answer(
-        "🛠 <b>Gamefa Bot Debug v5.13.0</b>\n\n"
+        "🛠 <b>Gamefa Bot Debug v5.11.0</b>\n\n"
         f"🤖 مدل: <code>{escape_html(MODEL)}</code>\n"
         f"🧠 AI Editor: {'🟢' if AI_EDITOR_ENABLED else '🔴'}\n"
         f"🧬 Semantic Duplicate: {'🟢' if ENABLE_SEMANTIC_DUPLICATE else '🔴'}\n"
