@@ -36,7 +36,7 @@ from openai import AsyncOpenAI
 
 
 # ============================================================
-# GAMEFA BOT v5.12.0
+# GAMEFA BOT v5.13.0
 # ============================================================
 # امکانات:
 # - پشتیبانی از لینک Gamefa و سایت‌های خبری دیگر
@@ -49,7 +49,7 @@ from openai import AsyncOpenAI
 # - Railway friendly
 # ============================================================
 
-BOT_VERSION = "v5.12.0"
+BOT_VERSION = "v5.13.0"
 # v5.11.0: تیتر بدون محدودیت تعداد کلمه
 # طول تیتر فقط با دقت، روانی و ارتباط با خبر کنترل می‌شود.
 HEADLINE_WORD_LIMIT = None
@@ -169,6 +169,39 @@ OPENAI_CLIENTS = {}
 OPENAI_KEY_INDEX = 0
 OPENAI_KEY_COOLDOWN = {}
 
+# وضعیت کلیدهای دائماً خراب با هش ذخیره می‌شود تا خود API Key هرگز روی دیسک نوشته نشود.
+OPENAI_DISABLED_KEYS = set()
+OPENAI_DISABLED_KEY_HASHES = set()
+OPENAI_KEY_STATE_FILE = Path(os.getenv("OPENAI_KEY_STATE_FILE", "openai_key_state.json"))
+
+def _openai_key_hash(key):
+    return hashlib.sha256((key or "").encode("utf-8")).hexdigest()
+
+def load_openai_key_state():
+    global OPENAI_DISABLED_KEY_HASHES, OPENAI_DISABLED_KEYS
+    try:
+        if not OPENAI_KEY_STATE_FILE.exists():
+            return
+        raw = json.loads(OPENAI_KEY_STATE_FILE.read_text(encoding="utf-8"))
+        hashes = raw.get("disabled_key_hashes", []) if isinstance(raw, dict) else []
+        if isinstance(hashes, list):
+            OPENAI_DISABLED_KEY_HASHES = {str(x) for x in hashes if x}
+        OPENAI_DISABLED_KEYS = {
+            i for i, key in enumerate(OPENAI_KEYS)
+            if _openai_key_hash(key) in OPENAI_DISABLED_KEY_HASHES
+        }
+    except Exception as error:
+        log.warning("OpenAI key state load error: %s", error)
+
+def save_openai_key_state():
+    try:
+        OPENAI_KEY_STATE_FILE.write_text(
+            json.dumps({"disabled_key_hashes": sorted(OPENAI_DISABLED_KEY_HASHES)}, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    except Exception as error:
+        log.warning("OpenAI key state save error: %s", error)
+
 memory = []
 prepared = {}
 processing_users = set()
@@ -178,6 +211,7 @@ logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(message)s",
 )
 log = logging.getLogger("gamefa_bot")
+load_openai_key_state()
 
 
 # ============================================================
@@ -223,6 +257,20 @@ def openai_retry_seconds(error):
     return 60.0
 
 
+def openai_is_permanently_invalid(error):
+    """Return True when the current key should be removed from failover."""
+    text = str(error or "").lower()
+    status = getattr(error, "status_code", None)
+    return (
+        status == 401
+        or "account_deactivated" in text
+        or "account deactivated" in text
+        or "invalid_api_key" in text
+        or "incorrect api key" in text
+        or "invalid api key" in text
+    )
+
+
 def openai_is_retryable(error):
     text = str(error or "").lower()
     status = getattr(error, "status_code", None)
@@ -250,10 +298,16 @@ def openai_is_retryable(error):
 
 
 async def openai_failover(callback):
-    global OPENAI_KEY_INDEX
+    global OPENAI_KEY_INDEX, OPENAI_DISABLED_KEYS
 
     if not OPENAI_KEYS:
         raise RuntimeError("هیچ کلید OpenAI تنظیم نشده است.")
+
+    # وضعیت دائمی را بر اساس هش کلیدها دوباره به index نگاشت می‌کنیم.
+    OPENAI_DISABLED_KEYS = {
+        i for i, key in enumerate(OPENAI_KEYS)
+        if _openai_key_hash(key) in OPENAI_DISABLED_KEY_HASHES
+    }
 
     last_error = None
     total_keys = len(OPENAI_KEYS)
@@ -261,13 +315,15 @@ async def openai_failover(callback):
     for offset in range(total_keys):
         index = (OPENAI_KEY_INDEX + offset) % total_keys
 
+        if index in OPENAI_DISABLED_KEYS:
+            continue
+
         if OPENAI_KEY_COOLDOWN.get(index, 0) > time.time():
             continue
 
         try:
             client = get_openai_client(index)
             result = await callback(client)
-
             OPENAI_KEY_INDEX = (index + 1) % total_keys
             OPENAI_KEY_COOLDOWN.pop(index, None)
             return result
@@ -275,22 +331,27 @@ async def openai_failover(callback):
         except Exception as error:
             last_error = error
 
+            if openai_is_permanently_invalid(error):
+                OPENAI_DISABLED_KEYS.add(index)
+                OPENAI_DISABLED_KEY_HASHES.add(_openai_key_hash(OPENAI_KEYS[index]))
+                OPENAI_KEY_COOLDOWN.pop(index, None)
+                save_openai_key_state()
+                log.error(
+                    "OpenAI key #%s permanently disabled and removed from failover: %s",
+                    index + 1, error,
+                )
+                continue
+
             if not openai_is_retryable(error):
                 raise
 
             wait = openai_retry_seconds(error)
-            OPENAI_KEY_COOLDOWN[index] = time.time() + min(
-                max(wait, 30), 1800
-            )
+            OPENAI_KEY_COOLDOWN[index] = time.time() + min(max(float(wait), 30.0), 1800.0)
+            log.warning("OpenAI key #%s temporarily unavailable; trying next key.", index + 1)
 
-            log.warning(
-                "OpenAI key #%s unavailable; trying another key.",
-                index + 1,
-            )
-
-    raise RuntimeError(
-        "تمام کلیدهای OpenAI فعلاً محدود، نامعتبر یا در دسترس نیستند."
-    ) from last_error
+    if last_error:
+        raise RuntimeError("هیچ کلید فعال OpenAI در این تلاش پاسخ موفق نداد.") from last_error
+    raise RuntimeError("تمام کلیدهای OpenAI غیرفعال یا در Cooldown هستند.")
 
 
 # ============================================================
@@ -1373,6 +1434,16 @@ FORBIDDEN_OUTPUT_TERMS = [
     "متن کامل مقاله",
     "در این صفحه",
     "fact",
+    "نظر شما",
+    "نظر شما چیست",
+    "نظرتان",
+    "به نظر شما",
+    "در ادامه بخوانید",
+    "ادامه این مطلب",
+    "برای اطلاعات بیشتر",
+    "لینک خبر",
+    "منبع:",
+    "منابع:",
 ]
 
 
@@ -1400,8 +1471,28 @@ def validate_generated_output(generated):
     return True
 
 
+def sanitize_ai_output(generated):
+    """خروجی AI را به تیتر + یک پاراگراف خبری محدود می‌کند."""
+    raw = clean_ai_text(generated or "")
+    raw = re.sub(r"```(?:text|markdown|html)?", "", raw, flags=re.I).replace("```", "")
+    lines = [clean_text(x) for x in raw.splitlines() if clean_text(x)]
+    if not lines:
+        return ""
+    title = lines[0]
+    body = clean_text(" ".join(lines[1:]))
+    for pattern in (
+        r"(?:نظر شما(?: درباره این خبر)?(?: چیست)?[؟?]?).*$",
+        r"(?:به نظر شما.*[؟?]).*$",
+        r"(?:نظرتان.*[؟?]).*$",
+        r"(?:برای اطلاعات بیشتر.*)$",
+        r"(?:ادامه این مطلب.*)$",
+    ):
+        body = re.sub(pattern, "", body, flags=re.I).strip()
+    body = re.sub(r"(?<!\w)#[\w\u0600-\u06FF-]+", "", body).strip()
+    return title + ("\n" + body if body else "")
+
 def format_post(generated):
-    generated = clean_ai_text(generated)
+    generated = sanitize_ai_output(generated)
 
     title, sentences = split_sentences(generated)
 
@@ -1780,10 +1871,6 @@ async def process_news(message, text):
                 reply_markup=None,
             )
 
-        await message.answer(
-            "✅ خبر آماده انتشار است.",
-            reply_markup=main_keyboard(),
-        )
 
     except Exception as error:
         log.exception("News processing error")
@@ -4631,7 +4718,7 @@ async def debug_command_v511(message: Message):
     if not is_admin(message): return
     results=await v56_health_check()
     await message.answer(
-        "🛠 <b>Gamefa Bot Debug v5.12.0</b>\n\n"
+        "🛠 <b>Gamefa Bot Debug v5.13.0</b>\n\n"
         f"🤖 مدل: <code>{escape_html(MODEL)}</code>\n"
         f"🧠 AI Editor: {'🟢' if AI_EDITOR_ENABLED else '🔴'}\n"
         f"🧬 Semantic Duplicate: {'🟢' if ENABLE_SEMANTIC_DUPLICATE else '🔴'}\n"
