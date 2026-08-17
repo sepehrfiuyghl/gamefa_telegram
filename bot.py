@@ -36,7 +36,7 @@ from openai import AsyncOpenAI
 
 
 # ============================================================
-# GAMEFA BOT v5.8.0
+# GAMEFA BOT v5.11.0
 # ============================================================
 # امکانات:
 # - پشتیبانی از لینک Gamefa و سایت‌های خبری دیگر
@@ -49,8 +49,8 @@ from openai import AsyncOpenAI
 # - Railway friendly
 # ============================================================
 
-BOT_VERSION = "v5.10.2"
-# v5.10.1: تیتر بدون محدودیت تعداد کلمه
+BOT_VERSION = "v5.11.0"
+# v5.11.0: تیتر بدون محدودیت تعداد کلمه
 # طول تیتر فقط با دقت، روانی و ارتباط با خبر کنترل می‌شود.
 HEADLINE_WORD_LIMIT = None
 MAX_NEWS_SENTENCES = 10
@@ -101,6 +101,24 @@ LEARNING_FILE = Path(os.getenv("LEARNING_FILE", "editorial_learning.json"))
 STATS_FILE = Path(os.getenv("STATS_FILE", "editorial_stats.json"))
 MAX_QUEUE = int(os.getenv("MAX_QUEUE", "20"))
 
+# ============================================================
+# V5.11 AI EDITOR / QUALITY / MEMORY SETTINGS
+# ============================================================
+ENABLE_SEMANTIC_DUPLICATE = os.getenv("ENABLE_SEMANTIC_DUPLICATE", "1").strip().lower() in ("1", "true", "yes", "on")
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small").strip()
+SEMANTIC_DUPLICATE_THRESHOLD = float(os.getenv("SEMANTIC_DUPLICATE_THRESHOLD", "0.90"))
+SEMANTIC_CANDIDATES = int(os.getenv("SEMANTIC_CANDIDATES", "24"))
+ENABLE_TITLE_VARIANTS = os.getenv("ENABLE_TITLE_VARIANTS", "1").strip().lower() in ("1", "true", "yes", "on")
+TITLE_VARIANTS_COUNT = int(os.getenv("TITLE_VARIANTS_COUNT", "5"))
+ENABLE_ENGAGEMENT_PROMPTS = os.getenv("ENABLE_ENGAGEMENT_PROMPTS", "1").strip().lower() in ("1", "true", "yes", "on")
+ENGAGEMENT_MIN_SCORE = int(os.getenv("ENGAGEMENT_MIN_SCORE", "68"))
+ENABLE_IMAGE_SCORING = os.getenv("ENABLE_IMAGE_SCORING", "1").strip().lower() in ("1", "true", "yes", "on")
+IMAGE_CANDIDATES_LIMIT = int(os.getenv("IMAGE_CANDIDATES_LIMIT", "6"))
+AI_EDITOR_ENABLED = os.getenv("AI_EDITOR_ENABLED", "1").strip().lower() in ("1", "true", "yes", "on")
+AI_EDITOR_MIN_SCORE = float(os.getenv("AI_EDITOR_MIN_SCORE", "0.82"))
+ENABLE_SPOILER_DETECTION = os.getenv("ENABLE_SPOILER_DETECTION", "1").strip().lower() in ("1", "true", "yes", "on")
+
+
 news_queue = deque()
 queue_worker_task = None
 queue_lock = asyncio.Lock()
@@ -109,7 +127,10 @@ editorial_stats = {
     "processed": 0, "published": 0, "duplicates": 0, "failed": 0,
     "images_ok": 0, "images_failed": 0, "breaking": 0,
     "web_search": 0, "multi_source": 0, "edits": 0, "rewrites": 0,
-    "hashtags": 0, "queue_max": 0, "publishing_disabled": 1, "mode_button_disabled": 1
+    "hashtags": 0, "queue_max": 0, "publishing_disabled": 1, "mode_button_disabled": 1,
+    "semantic_duplicates": 0, "title_variants": 0, "image_scored": 0,
+    "engagement_prompts": 0, "ai_editor": 0, "ai_editor_rejects": 0,
+    "breaking_ai": 0, "archive_links": 0, "quality_avg": 0.0
 }
 editorial_learning = []
 
@@ -865,6 +886,10 @@ async def fetch_generic(url):
         "description": description,
         "body": body,
         "image": image,
+        "image_candidates": list(dict.fromkeys([
+            x for x in image_candidates
+            if isinstance(x, str) and x.startswith(("http://", "https://"))
+        ]))[:10],
     }
 
     # اگر محتوای کافی پیدا نشد، caller می‌تواند Web Search را امتحان کند.
@@ -1239,7 +1264,7 @@ def title_word_count(title):
 
 
 def valid_title(title):
-    # از v5.10.1 به بعد هیچ سقف کلمه‌ای برای تیتر وجود ندارد.
+    # از v5.11.0 به بعد هیچ سقف کلمه‌ای برای تیتر وجود ندارد.
     # فقط شروع فارسی و خالی نبودن تیتر بررسی می‌شود.
     return bool(title) and starts_with_persian(title)
 
@@ -2197,6 +2222,11 @@ WRITING_MODES = {
     "short": "خبر کوتاه و فشرده",
     "exciting": "خبر پرانرژی اما حرفه‌ای و بدون اغراق",
 }
+WRITING_MODES.update({
+    "formal": "خبر رسمی، دقیق و کم‌هیجان",
+    "telegram": "خبر تلگرامی روان، کوتاه و ضربه‌ای بدون اغراق",
+    "analytical": "خبر تحلیلی اما کاملاً مبتنی بر واقعیت‌های منبع",
+})
 
 
 def load_editorial_state():
@@ -2447,7 +2477,7 @@ def build_custom_post(title, body, source=None, facts=None):
     prefix = ""
     if is_breaking(source or {}, facts or {}):
         prefix = "🚨 "
-    # هشتگ و برچسب احتمال اسپویل عمداً در v5.10.1 حذف شده‌اند.
+    # هشتگ و برچسب احتمال اسپویل عمداً در v5.11.0 حذف شده‌اند.
     return (
         "<b>" + escape_html(prefix + category + " " + title) + "</b>\n\n"
         + "🟣 " + escape_html(body)
@@ -3055,7 +3085,7 @@ def v56_finalize_post(post, source, facts):
     """پاک‌سازی نهایی: استیکر تیتر فقط یکی از سه دسته مجاز باشد و هشتگ حذف شود."""
     title, body = parse_editable_post(post)
     title = re.sub(r"^[🎮🎥📢🎬📱📰🟣🔵🟢🟡🟠⚪⚫🚨\s]+", "", title).strip()
-    # v5.10.1: تیتر دیگر به ۸ کلمه محدود نیست.
+    # v5.11.0: تیتر دیگر به ۸ کلمه محدود نیست.
     category = detect_category(title + " " + body, facts)
     title = f"{category} {title}"
     body = re.sub(r"(?<!\w)#[\w\u0600-\u06FF-]+", "", body)
@@ -3063,11 +3093,11 @@ def v56_finalize_post(post, source, facts):
     return "<b>" + escape_html(title) + "</b>\n\n🟣 " + escape_html(body) + "\n\n<b>🆔 @Gamefa_official</b>"
 
 # ============================================================
-# END V5.10.1 PRECISION EDITORIAL ENGINE
+# END V5.11.0 PRECISION EDITORIAL ENGINE
 # ============================================================
 
 # ============================================================
-# V5.10.1 PRECISION EDITORIAL ENGINE
+# V5.11.0 PRECISION EDITORIAL ENGINE
 # ============================================================
 # 15 قابلیت اصلی:
 # 1) استخراج واقعیت قبل از نگارش
@@ -3930,7 +3960,7 @@ async def v59_process_news(message, text):
         await message.answer("✅ <b>خبر آماده بررسی تحریریه است.</b>" + panel, parse_mode=ParseMode.HTML, reply_markup=main_keyboard())
     except Exception as error:
         stat_inc("failed")
-        log.exception("V5.10.1 news processing error")
+        log.exception("V5.11.0 news processing error")
         if status:
             try: await status.delete()
             except Exception: pass
@@ -3939,13 +3969,13 @@ async def v59_process_news(message, text):
         processing_users.discard(user_id)
 
 
-# v5.10.1 موتور اصلی
+# v5.11.0 موتور اصلی
 process_news = v59_process_news
 advanced_process_news = v59_process_news
 
 
 # ============================================================
-# V5.10.1 PRECISION + NATURAL NEWS ENGINE
+# V5.11.0 PRECISION + NATURAL NEWS ENGINE
 # ============================================================
 # این لایه روی موتور قبلی اضافه شده و چیزی از pipeline قبلی حذف نمی‌کند.
 # اهداف:
@@ -4005,45 +4035,13 @@ def v510_compact_title(title):
 
 
 def v510_compact_body(body):
-    """
-    فشرده‌سازی بدنه بدون عبور از split_sentences.
-
-    نکته مهم:
-    split_sentences() برای خروجی خام AI طراحی شده و اولین خط را تیتر
-    در نظر می‌گیرد. در این مرحله «body» از قبل از تیتر جدا شده است؛
-    بنابراین استفاده از split_sentences()[1] باعث حذف کل بدنه می‌شد.
-    """
-    text = clean_text(body or "")
-    if not text:
+    raw_body = clean_text(body or "")
+    if not raw_body:
         return ""
-
-    # بدنه ممکن است چندخطی یا یک‌پاراگرافی باشد.
-    lines = [
-        clean_sentence(x)
-        for x in text.replace("\r", "\n").splitlines()
-        if clean_sentence(x)
-    ]
-    text = " ".join(lines).strip()
-
-    # فقط خود بدنه را به جمله‌ها تقسیم می‌کنیم؛ تیتر از قبل جدا شده است.
-    sentences = re.split(r"(?<=[.!؟])\s+", text)
-    sentences = [
-        clean_sentence(x)
-        for x in sentences
-        if clean_sentence(x)
-    ]
-
-    # اگر متن نشانه پایان جمله نداشت، کل بدنه به‌عنوان یک جمله حفظ شود.
-    if not sentences and text:
-        sentences = [clean_sentence(text)]
-
-    sentences = [
-        ensure_persian_start(x, False)
-        for x in sentences
-        if clean_sentence(x)
-    ]
+    # body فقط بدنه است؛ split_sentences قبلاً کل body را به‌عنوان title می‌گرفت.
+    sentences = re.split(r"(?<=[.!؟])\s+", raw_body)
+    sentences = [ensure_persian_start(clean_sentence(x), False) for x in sentences if clean_sentence(x)]
     sentences = v510_remove_duplicate_sentences(sentences)
-
     return " ".join(sentences[:V510_MAX_SENTENCES])
 
 
@@ -4054,6 +4052,490 @@ def v510_finalize_text(title, body):
         title = ensure_persian_start(title or "خبر جدید", True)
     return title, body
 
+
+
+# ============================================================
+# V5.11.0 — NEXT-GEN GAMEFA AI EDITOR
+# ============================================================
+
+def cosine_similarity(a, b):
+    if not a or not b or len(a) != len(b):
+        return 0.0
+    dot = sum(x*y for x, y in zip(a, b))
+    na = sum(x*x for x in a) ** 0.5
+    nb = sum(y*y for y in b) ** 0.5
+    return dot / (na * nb) if na and nb else 0.0
+
+
+async def semantic_duplicate_check(text, title=""):
+    """دومین لایه ضدتکرار؛ فقط نامزدهای نزدیک محلی را با embedding بررسی می‌کند."""
+    if not ENABLE_SEMANTIC_DUPLICATE or not OPENAI_KEYS or not text:
+        return False, 0.0, None
+    candidates = []
+    for item in memory[-MAX_MEMORY:]:
+        old_text = str(item.get("semantic_text") or (item.get("title", "") + "\n" + item.get("source", "")[:6000]))
+        local = max(
+            word_similarity(title, item.get("title", "")) if title else 0.0,
+            word_similarity(text[:7000], old_text[:7000])
+        )
+        if local >= 0.34:
+            candidates.append((local, item, old_text))
+    candidates.sort(key=lambda x: x[0], reverse=True)
+    candidates = candidates[:SEMANTIC_CANDIDATES]
+    if not candidates:
+        return False, 0.0, None
+
+    try:
+        async def call(client):
+            values = [text[:9000]] + [x[2][:9000] for x in candidates]
+            return await client.embeddings.create(model=EMBEDDING_MODEL, input=values)
+        response = await openai_failover(call)
+        vectors = [x.embedding for x in response.data]
+        base = vectors[0]
+        best = (0.0, None)
+        for i, vector in enumerate(vectors[1:]):
+            sim = cosine_similarity(base, vector)
+            if sim > best[0]:
+                best = (sim, candidates[i][1])
+        if best[0] >= SEMANTIC_DUPLICATE_THRESHOLD:
+            stat_inc("semantic_duplicates")
+            return True, best[0], best[1]
+    except Exception as error:
+        log.warning("Semantic duplicate check failed: %s", error)
+    return False, 0.0, None
+
+
+def v511_news_score(source, facts, related=None, title="", body="", image_score=0.0):
+    """امتیاز جذابیت/اهمیت خبر از 0 تا 100."""
+    related = related or []
+    blob = norm(" ".join([
+        source.get("title", ""), source.get("description", ""),
+        source.get("body", "")[:8000], json.dumps(facts or {}, ensure_ascii=False)
+    ]))
+    high_terms = [
+        "gta", "grand theft auto", "playstation", "xbox", "nintendo",
+        "elden ring", "resident evil", "call of duty", "assassin", "marvel",
+        "dc", "netflix", "official", "confirmed", "رسماً", "تایید شد",
+        "معرفی", "تاریخ انتشار", "لغو", "تاخیر", "خرید", "فروش", "درگذشت",
+    ]
+    high = sum(1 for x in high_terms if norm(x) in blob)
+    freshness = 20 if source.get("web_search_used") else 12
+    multi = min(15, len(related) * 5)
+    source_score = int(source_quality(source) * 25)
+    title_score = min(15, len(re.findall(r"[\w\u0600-\u06FF]+", title or source.get("title",""))) * 1.2)
+    body_score = min(10, max(0, len(body) / 500))
+    score = min(100, round(15 + high*3 + freshness + multi + source_score + title_score + body_score + image_score*8))
+    return {
+        "score": score,
+        "importance": "زیاد" if score >= 78 else ("متوسط" if score >= 55 else "کم"),
+        "interest": min(100, round(score * 0.72 + min(100, len(related)*20) * 0.12 + image_score*16)),
+        "freshness": freshness,
+        "source": source_score,
+    }
+
+
+async def generate_title_variants(source, facts, draft_title, body):
+    if not ENABLE_TITLE_VARIANTS or not OPENAI_KEYS:
+        return [draft_title]
+    prompt = """تو سردبیر تیتر Gamefa هستی.
+۵ تیتر متفاوت برای همین خبر پیشنهاد بده.
+قوانین:
+- همه تیترها با فارسی شروع شوند.
+- هیچ ادعای تازه‌ای اضافه نشود.
+- کلیک‌بیتی، اغراق‌آمیز و مبهم نباشند.
+- نام بازی/فیلم/شرکت را در صورت نیاز حفظ کن.
+- محدودیت ۸ کلمه‌ای وجود ندارد.
+خروجی فقط JSON به شکل {"titles":["..."]}.
+"""
+    try:
+        response = await openai_failover(lambda client: client.responses.create(
+            model=MODEL, instructions=prompt,
+            input="FACTS:\n"+json.dumps(facts, ensure_ascii=False)+"\n\nDRAFT TITLE:\n"+draft_title+"\n\nBODY:\n"+body[:7000],
+            max_output_tokens=700
+        ))
+        raw=(response.output_text or "").strip()
+        a,b=raw.find("{"),raw.rfind("}")
+        if a<0 or b<0: return [draft_title]
+        data=json.loads(raw[a:b+1])
+        titles=data.get("titles",[]) if isinstance(data,dict) else []
+        cleaned=[]
+        for t in titles:
+            t=v510_compact_title(str(t))
+            if t and starts_with_persian(t) and t not in cleaned:
+                cleaned.append(t)
+        stat_inc("title_variants")
+        return ([draft_title] + cleaned)[:max(2,TITLE_VARIANTS_COUNT)]
+    except Exception as error:
+        log.warning("Title variants failed: %s", error)
+        return [draft_title]
+
+
+def choose_best_title(variants, source, facts, body):
+    best = None
+    best_score = -1
+    for title in variants or []:
+        score = 100
+        score -= v56_clickbait_score(title) * 35 if "v56_clickbait_score" in globals() else 0
+        if not starts_with_persian(title):
+            score -= 60
+        if len(title) > V510_MAX_TITLE_CHARS:
+            score -= 20
+        if title_word_count(title) < 4:
+            score -= 8
+        if title_word_count(title) > 24:
+            score -= 5
+        if word_similarity(title, source.get("title","")) < 0.12:
+            score -= 8
+        if body and word_similarity(title, body) < 0.05:
+            score -= 5
+        if score > best_score:
+            best_score, best = score, title
+    return best or (variants[0] if variants else source.get("title",""))
+
+
+def v511_engagement_question(source, facts, score):
+    if not ENABLE_ENGAGEMENT_PROMPTS or score < ENGAGEMENT_MIN_SCORE:
+        return ""
+    category = detect_category(source.get("title","") + " " + source.get("body",""), facts)
+    blob = norm(source.get("title","") + " " + source.get("body",""))
+    if category.startswith("🎮"):
+        if any(x in blob for x in ["release", "تاریخ انتشار", "عرضه", "تاخیر", "تاخیر"]):
+            q = "🎮 شما منتظر تجربه این بازی هستید؟"
+        elif any(x in blob for x in ["remake", "بازسازی", "ریمیک"]):
+            q = "🎮 به‌نظر شما این بازسازی می‌تواند موفق باشد؟"
+        else:
+            q = "🎮 نظر شما درباره این خبر چیست؟"
+    elif category.startswith("🎬"):
+        q = "🎬 نظرتان درباره این خبر چیست؟"
+    else:
+        q = "💬 نظر شما درباره این خبر چیست؟"
+    stat_inc("engagement_prompts")
+    return q
+
+
+def v511_image_candidates(source):
+    candidates = source.get("image_candidates") or []
+    if source.get("image"):
+        candidates = [source.get("image")] + list(candidates)
+    out=[]
+    seen=set()
+    for url in candidates:
+        if not isinstance(url,str) or not url.startswith(("http://","https://")):
+            continue
+        if url in seen: continue
+        seen.add(url); out.append(url)
+    return out[:IMAGE_CANDIDATES_LIMIT]
+
+
+async def smart_image_download_v511(source):
+    """چند تصویر را بررسی می‌کند و بهترین را بر اساس کیفیت/نسبت/نشانه‌های URL انتخاب می‌کند."""
+    if not ENABLE_IMAGE_SCORING:
+        return await smart_image_download(source)
+    candidates=v511_image_candidates(source)
+    if not candidates:
+        return None
+    scored=[]
+    for url in candidates:
+        path=await download_image(url)
+        if not path:
+            continue
+        score=0.50
+        low=url.lower()
+        if any(x in low for x in ["og:image","og_image","featured","feature","cover","hero","main","article"]): score+=0.18
+        if any(x in low for x in ["logo","avatar","icon","sprite","banner"]): score-=0.30
+        if Image:
+            try:
+                with Image.open(path) as img:
+                    w,h=img.size
+                    if w>=1200: score+=0.14
+                    elif w>=800: score+=0.09
+                    elif w>=500: score+=0.04
+                    else: score-=0.18
+                    if h>=500: score+=0.05
+                    ratio=w/max(h,1)
+                    if 1.25 <= ratio <= 2.2: score+=0.08
+                    elif ratio < 0.7 or ratio > 3.2: score-=0.12
+            except Exception:
+                pass
+        score=max(0,min(1,score))
+        scored.append((score,path,url))
+    if not scored:
+        stat_inc("images_failed")
+        return None
+    scored.sort(key=lambda x:x[0], reverse=True)
+    best_score,best_path,best_url=scored[0]
+    for _,path,_ in scored[1:]:
+        try:
+            if path != best_path: path.unlink(missing_ok=True)
+        except Exception: pass
+    source["selected_image_score"]=round(best_score,2)
+    source["selected_image_url"]=best_url
+    stat_inc("image_scored")
+    stat_inc("images_ok")
+    return best_path
+
+
+def v511_quality_panel(news_score, image_score, editor_score, breaking, spoiler, semantic=None):
+    lines=[
+        "\n\n━━━━━━━━━━━━━━━━━━",
+        "🧠 <b>Gamefa AI Editor v5.11</b>",
+        f"🔥 جذابیت خبر: <b>{news_score}/100</b>",
+        f"🎯 امتیاز سردبیر: <b>{int(editor_score*100)}/100</b>",
+        f"🖼 کیفیت تصویر: <b>{int(image_score*100)}/100</b>",
+        f"🚨 Breaking: <b>{'بله' if breaking else 'خیر'}</b>",
+        f"⚠️ Spoiler: <b>{'شناسایی شد' if spoiler else 'ندارد'}</b>",
+    ]
+    if semantic is not None:
+        lines.append(f"🧬 شباهت معنایی: <b>{int(semantic*100)}%</b>")
+    lines.append("━━━━━━━━━━━━━━━━━━")
+    return "\n".join(lines)
+
+
+async def v511_ai_editor(source, facts, title, body, related):
+    """ممیزی نهایی سردبیر هوشمند؛ خروجی فقط امتیاز و ایرادهاست."""
+    if not AI_EDITOR_ENABLED or not OPENAI_KEYS:
+        return {"score": 0.86, "pass": True, "issues": []}
+    prompt="""تو سردبیر نهایی Gamefa هستی.
+پیش‌نویس را با FACTS مقایسه کن.
+هیچ واقعیت جدیدی پیشنهاد نده.
+فقط JSON بده:
+{"score":0.0,"pass":true,"issues":[],"title_quality":0.0,"body_quality":0.0,"factuality":0.0}
+score بین 0 و 1.
+اگر عدد/تاریخ/نام مهم اشتباه یا ادعای بی‌منبع وجود دارد pass=false.
+"""
+    try:
+        response=await openai_failover(lambda client: client.responses.create(
+            model=MODEL,instructions=prompt,
+            input="FACTS:\n"+json.dumps(facts,ensure_ascii=False)+"\n\nTITLE:\n"+title+"\n\nBODY:\n"+body+"\n\nRELATED:\n"+json.dumps(related or [],ensure_ascii=False)[:5000],
+            max_output_tokens=700
+        ))
+        raw=(response.output_text or "").strip()
+        a,b=raw.find("{"),raw.rfind("}")
+        if a<0 or b<0: raise ValueError("AI editor JSON invalid")
+        data=json.loads(raw[a:b+1])
+        score=max(0,min(1,float(data.get("score",0) or 0)))
+        result={"score":score,"pass":bool(data.get("pass")) and score>=AI_EDITOR_MIN_SCORE,
+                "issues":data.get("issues",[]) if isinstance(data.get("issues",[]),list) else [],
+                "title_quality":float(data.get("title_quality",0) or 0),
+                "body_quality":float(data.get("body_quality",0) or 0),
+                "factuality":float(data.get("factuality",0) or 0)}
+        stat_inc("ai_editor")
+        if not result["pass"]: stat_inc("ai_editor_rejects")
+        return result
+    except Exception as error:
+        log.warning("AI editor failed: %s",error)
+        return {"score":0.78,"pass":False,"issues":["ویراستار هوشمند در دسترس نبود؛ کنترل محافظه‌کارانه اعمال شد."]}
+
+
+async def v511_process_news(message, text):
+    """موتور یکپارچه v5.11؛ بدون Preview و بدون Hot-News Queue UI."""
+    user_id=message.from_user.id
+    if user_id in processing_users:
+        await message.answer("⏳ یک خبر دیگر در حال پردازش است.")
+        return
+    processing_users.add(user_id)
+    status=None
+    try:
+        url=extract_url(text)
+        if url:
+            status=await message.answer("⏳ مرحله ۱/۸ — دریافت منبع و انتخاب تصویر...")
+            source=await fetch_article(url)
+            if source.get("web_search_used"): stat_inc("web_search")
+        else:
+            source={"url":"","domain":"manual","title":"","description":"","body":text,"image":"","image_candidates":[],"weak_extraction":False}
+
+        duplicate_text=source.get("title","")+"\n"+source.get("body","")
+        if duplicate(duplicate_text,source.get("title","")):
+            stat_inc("duplicates")
+            if status: await status.delete()
+            await message.answer("⚠️ این خبر یا نسخه بسیار مشابه آن قبلاً در آرشیو وجود دارد.",reply_markup=main_keyboard())
+            return
+        sem_dup,sem_score,sem_item=await semantic_duplicate_check(duplicate_text,source.get("title",""))
+        if sem_dup:
+            if status: await status.delete()
+            old_title=escape_html(str((sem_item or {}).get("title","خبر قبلی")))
+            await message.answer(f"🧬 <b>خبر مشابه معنایی پیدا شد.</b>\n\n{old_title}\n\nشباهت: <b>{int(sem_score*100)}%</b>",parse_mode=ParseMode.HTML,reply_markup=main_keyboard())
+            return
+
+        if status: await status.edit_text("🧠 مرحله ۲/۸ — استخراج واقعیت‌های قفل‌شده...")
+        facts=await extract_facts(source)
+        facts["v511"]={"semantic_duplicate_checked":True}
+        related=await multi_source_research(source)
+        source["related_sources"]=related
+        related_archive=v59_related_archive(source,facts) if "v59_related_archive" in globals() else []
+        conflicts=v57_archive_conflicts(source,facts) if "v57_archive_conflicts" in globals() else []
+
+        if status: await status.edit_text("🎯 مرحله ۳/۸ — امتیاز اهمیت و جذابیت...")
+        mode=normalize_mode(WRITING_MODE)
+        importance=v59_importance(source,facts,related) if "v59_importance" in globals() else {"score":60,"target":5}
+        generated,_,update_mode=await v59_generate(source,facts,related,related_archive,mode)
+        title,sentences=split_sentences(generated)
+        title, sentences = v59_final_prose(title," ".join(sentences))
+        if not title or not sentences:
+            generated=local_news_fallback(source,facts)
+            title,sentences=split_sentences(generated)
+
+        if status: await status.edit_text("✍️ مرحله ۴/۸ — ساخت و انتخاب تیتر...")
+        body=" ".join(sentences)
+        variants=await generate_title_variants(source,facts,title,body)
+        title=choose_best_title(variants,source,facts,body)
+        title,body=v510_finalize_text(title,body)
+        if not body:
+            # ضد خروجی خالی: یک fallback قطعی از FACTS/SOURCE
+            fallback=local_news_fallback(source,facts)
+            ft,fs=split_sentences(fallback)
+            title=v510_compact_title(ft or title)
+            body=" ".join(fs[:V510_MAX_SENTENCES])
+        if not body:
+            raise RuntimeError("متن خبر خالی است؛ ارسال متوقف شد تا خروجی خراب منتشر نشود.")
+
+        if status: await status.edit_text("🔎 مرحله ۵/۸ — ویراستار هوشمند و کنترل Fact Lock...")
+        editor=await v511_ai_editor(source,facts,title,body,related)
+        local_audit=v57_build_audit(source,facts,title,body,related) if "v57_build_audit" in globals() else {}
+        if conflicts:
+            editor["pass"]=False
+            editor.setdefault("issues",[]).append("تناقض احتمالی با خبرهای قبلی آرشیو.")
+        lock=v59_fact_lock(source,facts,title,body) if "v59_fact_lock" in globals() else {"numbers_ok":True,"dates_ok":True}
+        if not lock["numbers_ok"] or not lock["dates_ok"]:
+            editor["pass"]=False
+            editor.setdefault("issues",[]).append("Fact Lock برای عدد یا تاریخ مهم شکست خورد.")
+        if not editor["pass"]:
+            # یک اصلاح خودکار، بدون Preview/Approval UI
+            correction_prompt=V59_NEWS_PROMPT+"\nاصلاحات سردبیر:\n"+json.dumps(editor.get("issues",[]),ensure_ascii=False)
+            response=await openai_failover(lambda client: client.responses.create(
+                model=MODEL,instructions=correction_prompt,
+                input="FACTS LOCKED:\n"+json.dumps(facts,ensure_ascii=False)+"\n\nDRAFT:\n"+title+"\n"+body,
+                max_output_tokens=1800
+            ))
+            corrected=(response.output_text or "").strip()
+            ct,cs=split_sentences(corrected)
+            ct,cs=v59_final_prose(ct," ".join(cs))
+            cb=" ".join(cs)
+            if ct and cb:
+                title,body=v510_finalize_text(ct,cb)
+                editor2=await v511_ai_editor(source,facts,title,body,related)
+                if editor2["pass"]:
+                    editor=editor2
+
+        if not body:
+            raise RuntimeError("کنترل کیفیت اجازه ارسال متن خالی را نداد.")
+
+        if status: await status.edit_text("🖼 مرحله ۶/۸ — امتیازدهی و انتخاب بهترین تصویر...")
+        image_path=await smart_image_download_v511(source)
+        image_score=float(source.get("selected_image_score",0) or 0)
+        breaking=is_breaking(source,facts)
+        if breaking: stat_inc("breaking")
+        spoiler=detect_spoiler(source,facts)
+
+        news_score=v511_news_score(source,facts,related,title,body,image_score)
+        if breaking and news_score>=70: stat_inc("breaking_ai")
+        engagement=v511_engagement_question(source,facts,news_score)
+
+        if status: await status.edit_text("🧾 مرحله ۷/۸ — ساخت پست نهایی و حافظه تحریریه...")
+        post=build_custom_post(title,body,source,facts)
+        post=v56_finalize_post(post,source,facts)
+        if engagement:
+            # سؤال تعامل جدا از متن خبری می‌ماند تا Fact Lock و پاراگراف خبر دست‌نخورده بمانند.
+            post=post.replace("\n\n<b>🆔 @Gamefa_official</b>", "\n\n"+escape_html(engagement)+"\n\n<b>🆔 @Gamefa_official</b>")
+        if not post:
+            raise RuntimeError("ساخت متن نهایی ناموفق بود.")
+
+        avg=(float(editor.get("score",0))*100)
+        editorial_stats["quality_avg"]=round(((float(editorial_stats.get("quality_avg",0))*max(0,editorial_stats.get("processed",0)))+avg)/max(1,editorial_stats.get("processed",0)+1),2)
+
+        memory.append({
+            "hash":text_hash(duplicate_text),"semantic_text":duplicate_text[:9000],
+            "title":source.get("title","")[:500],"source":duplicate_text[:25000],
+            "post":post,"url":url or "","domain":source.get("domain",""),
+            "breaking":breaking,"spoiler":spoiler,"mode":mode,"length":len(split_sentences(title+"\n"+body)[1]),
+            "importance":importance,"news_score":news_score,"editor_score":editor.get("score",0),
+            "related_sources":related,"related_archive":related_archive,"conflicts":conflicts,
+            "facts_memory":facts.get("v57_memory",{}),"created_at":int(time.time()),
+        })
+        memory[:]=memory[-MAX_MEMORY:]
+        stat_inc("processed")
+        save_memory(); save_editorial_state()
+        prepared[user_id]={"text":post,"image":str(image_path) if image_path else "",
+            "source":source,"facts":facts,"title":title,"body":body,"mode":mode,
+            "length":len(split_sentences(title+"\n"+body)[1]),"quality":local_audit,
+            "editor":editor,"news_score":news_score,"image_score":image_score,
+            "breaking":breaking,"spoiler":spoiler,"engagement":engagement}
+
+        if status:
+            try: await status.delete()
+            except Exception: pass
+        if image_path and len(post)<=1024:
+            await message.answer_photo(FSInputFile(image_path),caption=post,parse_mode=ParseMode.HTML,reply_markup=advanced_publish_keyboard())
+        elif image_path:
+            await message.answer_photo(FSInputFile(image_path))
+            await message.answer(post,parse_mode=ParseMode.HTML,reply_markup=advanced_publish_keyboard())
+        else:
+            await message.answer(post,parse_mode=ParseMode.HTML,reply_markup=advanced_publish_keyboard())
+
+        panel=v511_quality_panel(news_score,image_score,float(editor.get("score",0)),breaking,spoiler,sem_score if sem_score else None)
+        panel+=f"\n📚 منابع مرتبط: <b>{len(related)}</b>"
+        if related_archive:
+            panel+=f"\n🔄 ارتباط با آرشیو: <b>{len(related_archive)}</b>"
+            stat_inc("archive_links")
+        if update_mode: panel+="\n🔄 <b>Update Mode:</b> تغییر جدید برجسته شد"
+        if editor.get("issues"):
+            panel+="\n⚠️ <b>"+escape_html(" | ".join(map(str,editor["issues"][:3])))+"</b>"
+        await message.answer("✅ <b>خبر با Gamefa AI Editor آماده شد.</b>"+panel,parse_mode=ParseMode.HTML,reply_markup=main_keyboard())
+    except Exception as error:
+        stat_inc("failed")
+        log.exception("V5.11.0 news processing error")
+        if status:
+            try: await status.delete()
+            except Exception: pass
+        await message.answer("❌ خطا هنگام پردازش خبر:\n\n"+str(error)[:1500],reply_markup=main_keyboard())
+    finally:
+        processing_users.discard(user_id)
+
+
+# فرمان Debug برای ادمین
+@router.message(Command("debug"))
+async def debug_command_v511(message: Message):
+    if not is_admin(message): return
+    results=await v56_health_check()
+    await message.answer(
+        "🛠 <b>Gamefa Bot Debug v5.11.0</b>\n\n"
+        f"🤖 مدل: <code>{escape_html(MODEL)}</code>\n"
+        f"🧠 AI Editor: {'🟢' if AI_EDITOR_ENABLED else '🔴'}\n"
+        f"🧬 Semantic Duplicate: {'🟢' if ENABLE_SEMANTIC_DUPLICATE else '🔴'}\n"
+        f"🖼 Image Scoring: {'🟢' if ENABLE_IMAGE_SCORING else '🔴'}\n"
+        f"💬 Engagement: {'🟢' if ENABLE_ENGAGEMENT_PROMPTS else '🔴'}\n"
+        f"🧠 Memory: <b>{len(memory)}</b>\n"
+        f"📥 Queue: <b>{len(news_queue)}</b>\n"
+        f"🔑 Keys: <b>{len(OPENAI_KEYS)}</b>\n"
+        "Health:\n" + "\n".join(v56_health_lines(results)),
+        parse_mode=ParseMode.HTML,reply_markup=main_keyboard()
+    )
+
+
+@router.message(Command("quality"))
+async def quality_command_v511(message: Message):
+    if not is_admin(message): return
+    vals=[float(x.get("editor_score",0) or 0) for x in memory if x.get("editor_score") is not None]
+    avg=sum(vals)/len(vals) if vals else 0
+    top=sorted(memory,key=lambda x: float(x.get("news_score",0) or 0),reverse=True)[:5]
+    lines=["🏆 <b>کیفیت و جذابیت اخبار</b>","",f"🎯 میانگین امتیاز AI Editor: <b>{int(avg*100)}/100</b>"]
+    for i,item in enumerate(top,1):
+        lines.append(f"{i}. {escape_html(str(item.get('title') or 'بدون تیتر'))} — <b>{item.get('news_score',0)}/100</b>")
+    await message.answer("\n".join(lines),parse_mode=ParseMode.HTML,reply_markup=main_keyboard())
+
+
+@router.message(Command("modes"))
+async def modes_command_v511(message: Message):
+    if not is_admin(message): return
+    lines=["✍️ <b>حالت‌های نگارش موجود</b>",""]
+    for key,desc in WRITING_MODES.items():
+        lines.append(f"• <code>{key}</code> — {escape_html(desc)}")
+    await message.answer("\n".join(lines),parse_mode=ParseMode.HTML,reply_markup=main_keyboard())
+
+
+# موتور v5.11 جایگزین pipeline قبلی می‌شود؛ Preview و Hot-News رتبه‌بندی حذف‌شده‌اند.
+process_news = v511_process_news
+advanced_process_news = v511_process_news
 
 # ============================================================
 # MAIN
