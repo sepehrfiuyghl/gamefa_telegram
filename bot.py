@@ -49,7 +49,7 @@ from openai import AsyncOpenAI
 # - Railway friendly
 # ============================================================
 
-BOT_VERSION = "v5.10.0"
+BOT_VERSION = "v5.9.1"
 # v5.9.1: no headline word-count limit
 HEADLINE_WORD_LIMIT = None
 
@@ -79,6 +79,7 @@ IMAGE_DIR.mkdir(parents=True, exist_ok=True)
 # 9  writing modes
 # 10 configurable length
 # 11 automatic hashtags
+# 12 spoiler detection
 # 13 processing queue
 # 14 async-friendly processing
 # 15 editorial dashboard
@@ -90,6 +91,7 @@ IMAGE_DIR.mkdir(parents=True, exist_ok=True)
 
 ENABLE_MULTI_SOURCE = os.getenv("ENABLE_MULTI_SOURCE", "1").strip().lower() in ("1", "true", "yes", "on")
 ENABLE_HASHTAGS = False  # هشتگ‌ها عمداً در v5.3.1 غیرفعال هستند.
+ENABLE_SPOILER_DETECTION = os.getenv("ENABLE_SPOILER_DETECTION", "1").strip().lower() in ("1", "true", "yes", "on")
 BREAKING_THRESHOLD = float(os.getenv("BREAKING_THRESHOLD", "0.82"))
 QUEUE_ENABLED = os.getenv("QUEUE_ENABLED", "1").strip().lower() in ("1", "true", "yes", "on")
 NEWS_LENGTH = os.getenv("NEWS_LENGTH", "auto").strip()
@@ -104,6 +106,7 @@ queue_lock = asyncio.Lock()
 queue_waiters = {}
 editorial_stats = {
     "processed": 0, "published": 0, "duplicates": 0, "failed": 0,
+    "images_ok": 0, "images_failed": 0, "breaking": 0, "spoilers": 0,
     "web_search": 0, "multi_source": 0, "edits": 0, "rewrites": 0,
     "hashtags": 0, "queue_max": 0, "publishing_disabled": 1, "mode_button_disabled": 1
 }
@@ -147,6 +150,35 @@ log = logging.getLogger("gamefa_bot")
 # ============================================================
 # OPENAI
 # ============================================================
+
+# V5.10 compatibility constants (defined before every runtime path)
+V57_MIN_CONFIDENCE = float(os.getenv("V57_MIN_CONFIDENCE", "0.84"))
+V57_EDITOR_THRESHOLD = float(os.getenv("V57_EDITOR_THRESHOLD", "0.86"))
+V57_MAX_VERIFY_OUTPUT = int(os.getenv("V57_MAX_VERIFY_OUTPUT", "1600"))
+V57_MAX_ARCHIVE_FACTS = int(os.getenv("V57_MAX_ARCHIVE_FACTS", "12"))
+V57_REWRITE_ON_VERIFY_FAIL = os.getenv("V57_REWRITE_ON_VERIFY_FAIL", "1").strip().lower() in ("1", "true", "yes", "on")
+
+V57_OFFICIAL_PATTERNS = [
+    "officially announced", "official announcement", "confirmed by", "official statement",
+    "officially confirmed", "announced by", "تأیید رسمی", "به صورت رسمی", "به‌صورت رسمی",
+    "رسماً اعلام", "رسما اعلام", "تأیید کرد", "اعلام کرد", "تأیید شد", "اعلام شد",
+]
+V57_REPORT_PATTERNS = [
+    "according to reports", "reported by", "reportedly", "sources say", "according to",
+    "گزارش شده", "طبق گزارش", "بر اساس گزارش", "منابع می‌گویند", "احتمال", "گفته می‌شود",
+    "شایعه", "rumor", "rumoured", "may", "could", "expected to",
+]
+V57_CLICKBAIT_TERMS = [
+    "باورنکردنی", "باور نکردنی", "شوک", "شوکه", "عجیب", "جنون", "بمب", "ترکاند",
+    "همه را غافلگیر", "با این خبر همه", "نمی‌توانید باور کنید", "هرگز حدس نمی‌زنید",
+    "باورنکردنی است", "shocking", "insane", "unbelievable", "you won't believe",
+]
+V57_SPOILER_TERMS = [
+    "اسپویل", "spoiler", "مرگ", "کشته می‌شود", "قاتل", "پایان", "فینال", "finale",
+    "ending", "death", "dies", "killed", "secret ending", "هویت واقعی",
+]
+
+
 
 def get_openai_client(index: int):
     if index not in OPENAI_CLIENTS:
@@ -1235,7 +1267,7 @@ def title_word_count(title):
 
 
 def valid_title(title):
-    return bool(title) and starts_with_persian(title)
+    return bool(title) and starts_with_persian(title) and title_word_count(title) <= 8
 
 
 def valid_sentence_count(sentences, requested=0):
@@ -2270,6 +2302,20 @@ def is_breaking(source, facts):
     return hits >= 2 or (hits >= 1 and source_quality(source) >= BREAKING_THRESHOLD)
 
 
+def detect_spoiler(source, facts):
+    if not ENABLE_SPOILER_DETECTION:
+        return False
+    text = norm(" ".join([
+        source.get("title", ""), source.get("body", "")[:8000],
+        json.dumps(facts, ensure_ascii=False),
+    ]))
+    spoiler_words = [
+        "spoiler", "اسپویل", "پایان بازی", "پایان فیلم", "قاتل", "مرگ شخصیت",
+        "ending", "finale", "dies", "death of", "secret ending", "plot twist",
+        "twist ending", "داستان بازی", "داستان فیلم",
+    ]
+    return any(x in text for x in spoiler_words)
+
 
 def make_hashtags(source, facts):
     if not ENABLE_HASHTAGS:
@@ -2431,10 +2477,13 @@ def build_custom_post(title, body, source=None, facts=None):
     prefix = ""
     if is_breaking(source or {}, facts or {}):
         prefix = "🚨 "
+    spoiler = ""
     # هشتگ‌ها در v5.3.1 به‌صورت کامل غیرفعال هستند.
     # حتی اگر تابع قدیمی make_hashtags در فایل باقی مانده باشد،
     # هیچ هشتگی وارد متن نهایی خبر نمی‌شود.
     suffix = ""
+    if spoiler:
+        suffix += "\n\n" + spoiler
     return (
         "<b>" + escape_html(prefix + category + " " + title) + "</b>\n\n"
         + "🟣 " + escape_html(body) + escape_html(suffix)
@@ -2464,6 +2513,7 @@ def editorial_dashboard_text():
         f"❌ ناموفق: <b>{editorial_stats.get('failed',0)}</b>\n"
         f"🖼 تصویر موفق: <b>{editorial_stats.get('images_ok',0)}</b>\n"
         f"🚨 Breaking: <b>{editorial_stats.get('breaking',0)}</b>\n"
+        f"⚠️ Spoiler: <b>{editorial_stats.get('spoilers',0)}</b>\n"
         f"🔎 Web Search: <b>{editorial_stats.get('web_search',0)}</b>\n"
         f"🌐 چندمنبعی: <b>{editorial_stats.get('multi_source',0)}</b>\n"
         f"✏️ اصلاحات: <b>{editorial_stats.get('edits',0)}</b>\n"
@@ -2596,7 +2646,7 @@ async def advanced_process_news(message, text):
             "hash": text_hash(duplicate_text), "title": source.get("title", ""),
             "source": duplicate_text[:25000], "post": post, "url": url or "",
             "domain": source.get("domain", ""), "breaking": breaking,
-            "mode": mode, "length": length,
+            "spoiler": spoiler, "mode": mode, "length": length,
             "related_sources": related, "quality": quality,
         })
         memory[:] = memory[-MAX_MEMORY:]
@@ -3042,9 +3092,6 @@ def v56_finalize_post(post, source, facts):
     """پاک‌سازی نهایی: استیکر تیتر فقط یکی از سه دسته مجاز باشد و هشتگ حذف شود."""
     title, body = parse_editable_post(post)
     title = re.sub(r"^[🎮🎥📢🎬📱📰🟣🔵🟢🟡🟠⚪⚫🚨\s]+", "", title).strip()
-    title_words = re.findall(r"[\w\u0600-\u06FF]+", title)
-    if len(title_words) > 8:
-        title = " ".join(title_words[:8])
     category = detect_category(title + " " + body, facts)
     title = f"{category} {title}"
     body = re.sub(r"(?<!\w)#[\w\u0600-\u06FF-]+", "", body)
@@ -3067,8 +3114,14 @@ def v56_finalize_post(post, source, facts):
 # 6) تشخیص «رسمی» فقط با شواهد
 # 7) ضد Clickbait
 # 8) قفل اعداد و تاریخ‌ها
-
-
+# 9) کنترل Spoiler
+# 10) Fact Memory
+# 11) تشخیص تناقض با آرشیو
+# 12) Confidence Score
+# 13) ویراستار دوم قبل از آماده‌سازی
+# 14) Breaking News با شواهد
+# 15) کنترل نهایی و انتشار فقط در حالت آماده
+# ============================================================
 
 def v57_numbers(text):
     text = text or ""
@@ -3188,6 +3241,13 @@ def v57_breaking(source, facts):
     return bool(strong and (official or source_quality(source)>=0.72))
 
 
+def v57_spoiler_level(source, facts):
+    blob=norm(" ".join([source.get("title", ""),source.get("description", ""),source.get("body", ""),json.dumps(facts or {},ensure_ascii=False)]))
+    hits=sum(1 for x in V57_SPOILER_TERMS if norm(x) in blob)
+    if hits>=3: return "شدید"
+    if hits>=1: return "احتمالی"
+    return "بدون اسپویل"
+
 
 def v57_title_body_match(title, body, source):
     title_words=set(norm(title).split())
@@ -3207,6 +3267,7 @@ def v57_build_audit(source, facts, draft_title, draft_body, related=None):
     conflicts=v57_archive_conflicts(source,facts)
     clickbait=v57_clickbait(draft_title)
     title_match=v57_title_body_match(draft_title,draft_body,source)
+    spoiler=v57_spoiler_level(source,facts)
     quality=source_quality(source)
     multi=min(1.0,len(related)/2.0)
     official_bonus=0.06 if status=="رسمی" else 0.0
@@ -3225,6 +3286,7 @@ def v57_build_audit(source, facts, draft_title, draft_body, related=None):
         "claim_coverage":evidence["claims"],
         "title_match":title_match,
         "clickbait":clickbait,
+        "spoiler":spoiler,
         "breaking":v57_breaking(source,facts),
         "archive_conflicts":conflicts,
         "related_sources":len(related),
@@ -3245,7 +3307,7 @@ V57_VERIFY_PROMPT="""
 6) اگر جمله‌ای اطلاعات تازه و بدون پشتوانه دارد، hallucination=true.
 7) اگر اشکال وجود دارد، نسخه اصلاح‌شده کوتاه از تیتر و بدنه را پیشنهاد بده؛ اطلاعات جدید اضافه نکن.
 8) خروجی فقط JSON معتبر با کلیدهای زیر باشد:
-{"pass":true,"score":0.0,"hallucination":false,"official_claim_ok":true,"numbers_ok":true,"dates_ok":true,"title_ok":true,"clickbait":0.0,"issues":[],"corrected_title":"","corrected_body":""}
+{"pass":true,"score":0.0,"hallucination":false,"official_claim_ok":true,"numbers_ok":true,"dates_ok":true,"title_ok":true,"clickbait":0.0,"spoiler":"بدون اسپویل","issues":[],"corrected_title":"","corrected_body":""}
 """
 
 
@@ -3270,7 +3332,7 @@ async def v57_verify_draft(source, facts, title, body, related=None):
         data=json.loads(raw[start:end+1])
         if not isinstance(data,dict):
             raise ValueError("خروجی ویراستار دیکشنری نیست")
-        for key,default in (("pass",False),("score",0.0),("hallucination",True),("official_claim_ok",False),("numbers_ok",False),("dates_ok",False),("title_ok",False),("clickbait",audit["clickbait"]),("issues",[]),("corrected_title",""),("corrected_body","")):
+        for key,default in (("pass",False),("score",0.0),("hallucination",True),("official_claim_ok",False),("numbers_ok",False),("dates_ok",False),("title_ok",False),("clickbait",audit["clickbait"]),("spoiler",audit["spoiler"]),("issues",[]),("corrected_title",""),("corrected_body","")):
             data.setdefault(key,default)
         data["local_audit"]=audit
         data["score"]=max(0.0,min(1.0,float(data.get("score",0) or 0)))
@@ -3284,7 +3346,7 @@ async def v57_verify_draft(source, facts, title, body, related=None):
             "pass":safe,"score":audit["confidence"],"hallucination":not safe,
             "official_claim_ok":audit["status"]!="نامشخص","numbers_ok":audit["numbers_ok"],
             "dates_ok":audit["dates_ok"],"title_ok":audit["title_match"]>=0.35,
-            "clickbait":audit["clickbait"],
+            "clickbait":audit["clickbait"],"spoiler":audit["spoiler"],
             "issues":["ویراستار دوم در دسترس نبود؛ ممیزی محلی اعمال شد."],
             "corrected_title":"","corrected_body":"","local_audit":audit
         }
@@ -3316,6 +3378,7 @@ def v57_quality_panel(audit, verify):
         f"🏷 وضعیت خبر: <b>{escape_html(str(audit.get('status','نامشخص')))}</b>\n"
         f"🎯 تیتر: <b>{'✅' if verify.get('title_ok') else '⚠️'}</b>\n"
         f"🚫 Clickbait: <b>{int(float(audit.get('clickbait',0))*100)}/100</b>\n"
+        f"⚠️ Spoiler: <b>{escape_html(str(audit.get('spoiler','بدون اسپویل')))}</b>\n"
         f"♻️ تناقض آرشیو: <b>{conflicts}</b>\n"
         f"🌐 منابع مرتبط: <b>{audit.get('related_sources',0)}</b>\n"
         f"\n{status}\n"
@@ -3417,7 +3480,7 @@ async def v57_process_news(message, text):
             "hash":text_hash(duplicate_text),"title":source.get("title","")[:500],
             "source":duplicate_text[:25000],"post":post,"url":url or "",
             "domain":source.get("domain",""),"breaking":bool(audit.get("breaking")),
-            "mode":mode,"length":length,
+            "spoiler":audit.get("spoiler"),"mode":mode,"length":length,
             "related_sources":related,"quality":audit,"v57_verify":verify,
             "facts_memory":facts.get("v57_memory",{}),"created_at":int(time.time()),
         })
@@ -3481,6 +3544,7 @@ advanced_process_news=v57_process_news
 # 18 Duplicate معنایی
 # 19 Update Mode برای ادامه خبرهای آرشیو
 # 20 Breaking داخلی
+# 21 Spoiler داخلی
 # 22 یادگیری از اصلاحات ادمین
 # 23 کنترل تصویر
 # 24 جلوگیری از ادعای بدون منبع
@@ -3489,6 +3553,7 @@ advanced_process_news=v57_process_news
 
 V59_MAX_SENTENCES = 10
 V59_MIN_SENTENCES = 1
+V59_MAX_TITLE_WORDS = 8
 V59_IMPORTANCE_KEYWORDS = {
     "high": [
         "تاریخ انتشار", "تاریخ اکران", "رسماً", "تأیید شد", "تایید شد",
@@ -3574,7 +3639,7 @@ def v59_importance(source, facts, related=None):
     score = min(100, 25 + high * 10 + medium * 4 + min(claim_count, 8) * 3 + min(len(related), 3) * 5)
     if score >= 72:
         level = "high"
-        target = min(10, max(5, claim_count + 2))
+        target = min(10, max(6, min(8, claim_count + 2)))
     elif score >= 48:
         level = "medium"
         target = min(7, max(4, min(6, claim_count)))
@@ -3709,6 +3774,8 @@ def v59_final_prose(title, body):
 def v59_validate(title, sentences, source, facts, related_archive=None):
     if not title or not sentences or len(sentences) > V59_MAX_SENTENCES:
         return False, ["طول خروجی نامعتبر است"]
+    if title_word_count(title) > V59_MAX_TITLE_WORDS:
+        return False, ["تیتر بیش از ۸ کلمه است"]
     if not starts_with_persian(title):
         return False, ["تیتر باید با فارسی شروع شود"]
     if any(not starts_with_persian(x) for x in sentences):
@@ -3729,107 +3796,6 @@ def v59_validate(title, sentences, source, facts, related_archive=None):
     if "v57_clickbait" in globals() and v57_clickbait(title) >= 0.45:
         issues.append("تیتر کلیک‌بیتی است")
     return not issues, issues
-
-
-
-# ============================================================
-# V5.10 EDITORIAL ENGINE — 21 CAPABILITIES
-# ============================================================
-V510_MAX_SENTENCES = 10
-V510_MIN_CONFIDENCE = 0.70
-
-
-def v510_importance_label(score):
-    if score >= 75: return "🔥 مهم"
-    if score >= 50: return "🟡 معمولی"
-    return "⚪ کم‌اهمیت"
-
-
-def v510_editorial_score(audit, verify, title, body, source, facts):
-    """امتیاز نهایی چندبعدی: منبع، پوشش ادعا، اعداد/تاریخ، تیتر، روانی و ضدتوهم."""
-    vals = [
-        float(audit.get("source_quality", 0)),
-        float(audit.get("claim_coverage", 0)),
-        1.0 if audit.get("numbers_ok") else 0.55,
-        1.0 if audit.get("dates_ok") else 0.75,
-        max(0.0, 1.0 - float(audit.get("clickbait", 0))),
-        float(audit.get("title_match", 0)),
-        float(verify.get("score", 0) or 0),
-    ]
-    if verify.get("hallucination"):
-        vals.append(0.15)
-    score = sum(vals) / len(vals)
-    # جریمه برای متن بیش از حد طولانی یا جملات تکراری
-    count = v59_sentence_count(body)
-    if count > V510_MAX_SENTENCES: score -= 0.15
-    score = max(0.0, min(1.0, score))
-    return round(score, 2)
-
-
-def v510_detect_contradictions(source, facts, related):
-    """تناقض‌های واضح بین منبع اصلی و منابع مرتبط را علامت می‌زند؛ حدس نمی‌زند."""
-    issues=[]
-    base=json.dumps(facts or {}, ensure_ascii=False)
-    base_status=v57_status(source,facts) if "v57_status" in globals() else "نامشخص"
-    for item in related or []:
-        txt=json.dumps(item, ensure_ascii=False)
-        other_status="رسمی" if any(norm(x) in norm(txt) for x in V57_OFFICIAL_PATTERNS) else None
-        if other_status and base_status and base_status != "رسمی" and any(norm(x) in norm(base) for x in V57_REPORT_PATTERNS):
-            issues.append("وضعیت تأیید خبر بین منابع یکسان نیست")
-    return list(dict.fromkeys(issues))[:3]
-
-
-def v510_quality_flags(title, body, source, facts):
-    flags=[]
-    if not title or not body: flags.append("خروجی ناقص است")
-    if not starts_with_persian(title): flags.append("تیتر باید با فارسی شروع شود")
-    if any(not starts_with_persian(x) for x in re.split(r'(?<=[.!؟])\s+', body) if x.strip()):
-        flags.append("شروع فارسی جملات رعایت نشده است")
-    if len(body) > 3200: flags.append("متن بیش از حد طولانی است")
-    if re.search(r'!{2,}|‼{2,}', title): flags.append("تیتر بیش از حد هیجانی است")
-    return flags
-
-
-def v510_compact_body(sentences):
-    # اصل طلایی: کوتاه‌ترین نسخه‌ای که معنی را کامل منتقل می‌کند.
-    out=[]
-    for s in sentences:
-        s=clean_sentence(s)
-        if not s: continue
-        if any(word_similarity(s, old) >= 0.80 for old in out): continue
-        out.append(s)
-    return out[:V510_MAX_SENTENCES]
-
-
-async def v510_editorial_polish(source, facts, title, sentences, related):
-    """مرحله آخر ویراستاری: حذف تکرار، ادعای اضافه، کلیشه و حفظ درجه قطعیت."""
-    body=" ".join(sentences)
-    prompt="""
-تو ویراستار نهایی Gamefa هستی.
-این متن را فقط در صورت نیاز اصلاح کن.
-- معنی و واقعیت‌ها را تغییر نده.
-- هیچ اطلاعات جدیدی اضافه نکن.
-- اگر دو جمله یک مفهوم دارند، ادغام یا یکی را حذف کن.
-- خبر ساده را کوتاه نگه دار.
-- حداکثر ۱۰ جمله.
-- تیتر محدودیت تعداد کلمه ندارد، اما باید طبیعی و خبری باشد.
-- رسمی، گزارش و شایعه را با هم قاطی نکن.
-- لحن فارسی روان، مستقیم و جذاب باشد.
-- خروجی فقط تیتر و سپس یک پاراگراف باشد.
-"""
-    try:
-        response=await openai_failover(lambda client: client.responses.create(
-            model=MODEL,instructions=prompt,
-            input="FACTS:\n"+json.dumps(facts or {},ensure_ascii=False)+"\n\nDRAFT:\n"+title+"\n"+body,
-            max_output_tokens=1100
-        ))
-        t, ss=split_sentences((response.output_text or "").strip())
-        t, ss=v59_final_prose(t," ".join(ss))
-        if t and ss and len(ss)<=10:
-            return t, v510_compact_body(ss)
-    except Exception:
-        pass
-    return title, v510_compact_body(sentences)
 
 
 async def v59_process_news(message, text):
@@ -3909,10 +3875,7 @@ async def v59_process_news(message, text):
                 issues = issues2
 
         if status: await status.edit_text("🔎 مرحله ۶/۷ — ویراستار نهایی و کنترل کیفیت...")
-        title, sentences = await v510_editorial_polish(source, facts, title, sentences, related)
-        sentences = v510_compact_body(sentences)
         body = " ".join(sentences)
-        contradiction_flags = v510_detect_contradictions(source, facts, related)
         verify = await v57_verify_draft(source, facts, title, body, related) if "v57_verify_draft" in globals() else {"pass": valid, "score": 0.85, "issues": issues}
         audit = verify.get("local_audit") or (v57_build_audit(source, facts, title, body, related) if "v57_build_audit" in globals() else {})
         lock = v59_fact_lock(source, facts, title, body)
@@ -3925,16 +3888,9 @@ async def v59_process_news(message, text):
         if conflicts:
             verify["pass"] = False
             verify.setdefault("issues", []).append("تناقض احتمالی با آرشیو قبلی")
-        if contradiction_flags:
-            verify["pass"] = False
-            verify.setdefault("issues", []).extend(contradiction_flags)
 
-        final_conf = v510_editorial_score(audit, verify, title, body, source, facts)
-        verify["editorial_score"] = final_conf
-        quality_flags = v510_quality_flags(title, body, source, facts)
-        if quality_flags:
-            verify.setdefault("issues", []).extend(quality_flags)
-        ready = bool(verify.get("pass")) and final_conf >= V510_MIN_CONFIDENCE and not conflicts and not contradiction_flags and not quality_flags
+        final_conf = float(verify.get("score", audit.get("confidence", 0.0)) or 0.0)
+        ready = bool(verify.get("pass")) and final_conf >= V57_MIN_CONFIDENCE and not conflicts
         post = build_custom_post(title, body, source, facts)
         post = v56_finalize_post(post, source, facts)
         if not post:
@@ -3948,10 +3904,10 @@ async def v59_process_news(message, text):
             "hash": text_hash(duplicate_text), "title": source.get("title", "")[:500],
             "source": duplicate_text[:25000], "post": post, "url": url or "",
             "domain": source.get("domain", ""), "breaking": breaking,
-            "mode": mode, "length": len(sentences),
+            "spoiler": spoiler, "mode": mode, "length": len(sentences),
             "adaptive_importance": importance, "update_mode": update_mode,
             "related_sources": related, "related_archive": related_archive,
-            "quality": audit, "v59_verify": verify, "editorial_score": final_conf,
+            "quality": audit, "v59_verify": verify,
             "facts_memory": facts.get("v57_memory", {}), "created_at": int(time.time()),
         })
         memory[:] = memory[-MAX_MEMORY:]
@@ -3961,7 +3917,7 @@ async def v59_process_news(message, text):
             "source": source, "facts": facts, "title": title, "body": body,
             "mode": mode, "length": len(sentences), "quality": audit,
             "v57_verify": verify, "ready": ready, "update_mode": update_mode,
-            "importance": importance, "editorial_score": final_conf, "quality_flags": quality_flags,
+            "importance": importance,
         }
         if status:
             try: await status.delete()
