@@ -6,6 +6,7 @@ import asyncio
 import logging
 import hashlib
 import time
+import sqlite3
 from pathlib import Path
 from urllib.parse import urlparse, urljoin
 from collections import deque
@@ -36,7 +37,7 @@ from openai import AsyncOpenAI
 
 
 # ============================================================
-# GAMEFA BOT v5.12.0
+# GAMEFA BOT v5.16.1
 # ============================================================
 # امکانات:
 # - پشتیبانی از لینک Gamefa و سایت‌های خبری دیگر
@@ -49,7 +50,7 @@ from openai import AsyncOpenAI
 # - Railway friendly
 # ============================================================
 
-BOT_VERSION = "v5.14.0"
+BOT_VERSION = "v5.16.1"
 # v5.11.0: تیتر بدون محدودیت تعداد کلمه
 # طول تیتر فقط با دقت، روانی و ارتباط با خبر کنترل می‌شود.
 HEADLINE_WORD_LIMIT = None
@@ -102,7 +103,7 @@ STATS_FILE = Path(os.getenv("STATS_FILE", "editorial_stats.json"))
 MAX_QUEUE = int(os.getenv("MAX_QUEUE", "20"))
 
 # ============================================================
-# V5.12 GAMEFA BRAIN / FACT CHECK / STORY MEMORY
+# V5.15.0 GAMEFA BRAIN / FACT CHECK / STORY MEMORY
 # ============================================================
 ENABLE_FACT_CHECK = os.getenv("ENABLE_FACT_CHECK", "1").strip().lower() in ("1", "true", "yes", "on")
 FACT_CHECK_MIN_CONFIDENCE = float(os.getenv("FACT_CHECK_MIN_CONFIDENCE", "0.82"))
@@ -170,6 +171,103 @@ OPENAI_KEY_INDEX = 0
 OPENAI_KEY_COOLDOWN = {}
 # کلیدهایی که خطای دائمی گرفته‌اند؛ تا ری‌استارت بعدی از چرخه Failover خارج می‌شوند.
 OPENAI_DISABLED_KEYS = set()
+
+# ============================================================
+# v5.16.1 OPENAI API KEY ANALYTICS
+# Persistent SQLite statistics survive Railway restarts/deploys.
+# ============================================================
+API_STATS_DB = Path(os.getenv("API_STATS_DB", "gamefa_api_stats.sqlite3"))
+API_STATS_DB.parent.mkdir(parents=True, exist_ok=True)
+API_STATS_LOCK = asyncio.Lock()
+
+def _api_db_conn():
+    conn = sqlite3.connect(str(API_STATS_DB), timeout=30)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("""CREATE TABLE IF NOT EXISTS api_keys (
+        key_index INTEGER PRIMARY KEY, key_hash TEXT, state TEXT DEFAULT 'active',
+        total_requests INTEGER DEFAULT 0, successful_requests INTEGER DEFAULT 0,
+        failed_requests INTEGER DEFAULT 0, failovers INTEGER DEFAULT 0,
+        rate_limits INTEGER DEFAULT 0, auth_errors INTEGER DEFAULT 0,
+        client_errors INTEGER DEFAULT 0, server_errors INTEGER DEFAULT 0,
+        timeouts INTEGER DEFAULT 0, other_errors INTEGER DEFAULT 0,
+        total_input_tokens INTEGER DEFAULT 0, total_output_tokens INTEGER DEFAULT 0,
+        total_tokens INTEGER DEFAULT 0, last_used_at REAL, last_success_at REAL,
+        last_error_at REAL, last_error TEXT, disabled_at REAL, cooldown_until REAL
+    )""")
+    conn.commit()
+    return conn
+
+def _key_hash(key):
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
+
+def api_stats_init():
+    conn=_api_db_conn()
+    try:
+        for i,key in enumerate(OPENAI_KEYS):
+            conn.execute("INSERT OR IGNORE INTO api_keys(key_index,key_hash) VALUES(?,?)", (i,_key_hash(key)))
+            conn.execute("UPDATE api_keys SET key_hash=? WHERE key_index=?", (_key_hash(key),i))
+        conn.commit()
+        rows=conn.execute("SELECT key_index,state,cooldown_until FROM api_keys").fetchall()
+        for key_index,state,cooldown_until in rows:
+            if key_index >= len(OPENAI_KEYS):
+                continue
+            if state == 'disabled':
+                OPENAI_DISABLED_KEYS.add(key_index)
+            elif state == 'cooldown' and cooldown_until and cooldown_until > time.time():
+                OPENAI_KEY_COOLDOWN[key_index] = cooldown_until
+            elif state == 'cooldown':
+                conn.execute("UPDATE api_keys SET state='active', cooldown_until=NULL WHERE key_index=?", (key_index,))
+        conn.commit()
+    finally:
+        conn.close()
+
+def _api_stat_update(index, field, amount=1):
+    conn=_api_db_conn()
+    try:
+        conn.execute(f"UPDATE api_keys SET {field}={field}+? WHERE key_index=?", (int(amount),index))
+        conn.commit()
+    finally:
+        conn.close()
+
+def _api_stat_event(index, response=None, error=None, failover=False):
+    conn=_api_db_conn(); now=time.time()
+    try:
+        if index >= len(OPENAI_KEYS): return
+        conn.execute("UPDATE api_keys SET total_requests=total_requests+1,last_used_at=? WHERE key_index=?",(now,index))
+        if failover:
+            conn.execute("UPDATE api_keys SET failovers=failovers+1 WHERE key_index=?",(index,))
+        if error is None:
+            usage=getattr(response,'usage',None)
+            inp=int(getattr(usage,'input_tokens',0) or 0)
+            out=int(getattr(usage,'output_tokens',0) or 0)
+            total=int(getattr(usage,'total_tokens',inp+out) or (inp+out))
+            conn.execute("UPDATE api_keys SET successful_requests=successful_requests+1,total_input_tokens=total_input_tokens+?,total_output_tokens=total_output_tokens+?,total_tokens=total_tokens+?,last_success_at=?,state=CASE WHEN state='cooldown' THEN 'active' ELSE state END WHERE key_index=?",(inp,out,total,now,index))
+        else:
+            text=str(error)[:500]; low=text.lower(); status=getattr(error,'status_code',None)
+            field='other_errors'
+            if status==401 or 'account_deactivated' in low or 'invalid_api_key' in low or 'incorrect api key' in low: field='auth_errors'
+            elif status==429 or 'rate limit' in low or 'quota' in low: field='rate_limits'
+            elif status in (408,) or 'timeout' in low or 'timed out' in low: field='timeouts'
+            elif status in (400,403,404,409,422): field='client_errors'
+            elif status in (500,502,503,504): field='server_errors'
+            conn.execute(f"UPDATE api_keys SET failed_requests=failed_requests+1,{field}={field}+1,last_error_at=?,last_error=? WHERE key_index=?",(now,text,index))
+        conn.commit()
+    finally: conn.close()
+
+def _api_stat_state(index, state, cooldown_until=None, error=None):
+    conn=_api_db_conn(); now=time.time()
+    try:
+        conn.execute("UPDATE api_keys SET state=?, cooldown_until=?, last_error=COALESCE(?,last_error), disabled_at=CASE WHEN ?='disabled' THEN ? ELSE disabled_at END WHERE key_index=?",(state,cooldown_until,str(error)[:500] if error else None,state,now if state=='disabled' else None,index))
+        conn.commit()
+    finally: conn.close()
+
+def api_stats_rows():
+    conn=_api_db_conn()
+    try:
+        return conn.execute("SELECT * FROM api_keys ORDER BY key_index").fetchall()
+    finally: conn.close()
+
+api_stats_init()
 
 memory = []
 prepared = {}
@@ -267,64 +365,42 @@ def openai_is_retryable(error):
 
 async def openai_failover(callback):
     global OPENAI_KEY_INDEX
-
     if not OPENAI_KEYS:
         raise RuntimeError("هیچ کلید OpenAI تنظیم نشده است.")
-
-    last_error = None
-    total_keys = len(OPENAI_KEYS)
-
+    last_error=None; total_keys=len(OPENAI_KEYS)
+    attempted=[]
     for offset in range(total_keys):
-        index = (OPENAI_KEY_INDEX + offset) % total_keys
-
-        # کلیدهای خراب/غیرفعال اصلاً دوباره امتحان نمی‌شوند.
-        if index in OPENAI_DISABLED_KEYS:
+        index=(OPENAI_KEY_INDEX+offset)%total_keys
+        if index in OPENAI_DISABLED_KEYS or OPENAI_KEY_COOLDOWN.get(index,0)>time.time():
             continue
-
-        if OPENAI_KEY_COOLDOWN.get(index, 0) > time.time():
-            continue
-
+        attempted.append(index)
         try:
-            client = get_openai_client(index)
-            result = await callback(client)
-
-            OPENAI_KEY_INDEX = (index + 1) % total_keys
-            OPENAI_KEY_COOLDOWN.pop(index, None)
+            client=get_openai_client(index)
+            result=await callback(client)
+            _api_stat_event(index,response=result)
+            OPENAI_KEY_INDEX=(index+1)%total_keys
+            OPENAI_KEY_COOLDOWN.pop(index,None)
+            _api_stat_state(index,'active',None)
             return result
-
         except Exception as error:
-            last_error = error
-
-            # خطاهای دائمی مثل account_deactivated / invalid_api_key:
-            # این کلید را از چرخه خارج کن و مستقیم سراغ کلید بعدی برو.
+            last_error=error
+            _api_stat_event(index,error=error,failover=True)
             if openai_is_permanently_invalid(error):
                 OPENAI_DISABLED_KEYS.add(index)
-                OPENAI_KEY_COOLDOWN.pop(index, None)
-                log.error(
-                    "OpenAI key #%s permanently disabled; removed from failover cycle. Error: %s",
-                    index + 1,
-                    error,
-                )
+                OPENAI_KEY_COOLDOWN.pop(index,None)
+                _api_stat_state(index,'disabled',None,error)
+                log.error("OpenAI key #%s permanently disabled: %s",index+1,error)
                 continue
-
             if not openai_is_retryable(error):
                 raise
-
-            wait = openai_retry_seconds(error)
-            OPENAI_KEY_COOLDOWN[index] = time.time() + min(
-                max(wait, 30), 1800
-            )
-
-            log.warning(
-                "OpenAI key #%s unavailable; trying another key.",
-                index + 1,
-            )
-
+            wait=min(max(openai_retry_seconds(error),30),1800)
+            until=time.time()+wait
+            OPENAI_KEY_COOLDOWN[index]=until
+            _api_stat_state(index,'cooldown',until,error)
+            log.warning("OpenAI key #%s cooldown %.0fs; trying next key",index+1,wait)
+            continue
     if last_error:
-        disabled_count = len(OPENAI_DISABLED_KEYS)
-        raise RuntimeError(
-            f"تمام کلیدهای OpenAI در دسترس نیستند. {disabled_count} کلید به‌دلیل خطای دائمی از چرخه خارج شده‌اند."
-        ) from last_error
+        raise RuntimeError(f"تمام کلیدهای OpenAI در دسترس نیستند. کلیدهای غیرفعال: {len(OPENAI_DISABLED_KEYS)}") from last_error
     raise RuntimeError("تمام کلیدهای OpenAI در حال حاضر در Cooldown یا غیرفعال هستند.")
 
 
@@ -2261,7 +2337,7 @@ async def clear_command(message: Message):
 # TEXT HANDLER
 # ============================================================
 
-@router.message(F.text)
+@router.message(F.text, ~F.text.startswith("/"))
 async def text_handler(message: Message):
     if not is_admin(message):
         return
@@ -2577,34 +2653,58 @@ def build_custom_post(title, body, source=None, facts=None):
     )
 
 
-def key_health_snapshot():
-    now = time.time()
-    rows = []
-    for index, key in enumerate(OPENAI_KEYS):
-        cooldown = max(0, int(OPENAI_KEY_COOLDOWN.get(index, 0) - now))
-        if cooldown:
-            status = f"🟡 cooldown {cooldown}s"
-        else:
-            status = "🟢 آماده"
-        rows.append(f"{index + 1}️⃣ {status}")
-    return rows or ["❌ کلیدی تنظیم نشده است"]
+def _mask_key(key):
+    if not key: return "—"
+    return f"{key[:3]}…{key[-4:]}"
 
+def key_health_snapshot():
+    now=time.time(); rows=[]
+    db={r[0]:r for r in api_stats_rows()}
+    for i,key in enumerate(OPENAI_KEYS):
+        r=db.get(i); cooldown=max(0,int((r[20] or 0)-now)) if r else 0
+        disabled=i in OPENAI_DISABLED_KEYS or (r and r[2]=='disabled')
+        if disabled: state='🔴 غیرفعال'
+        elif cooldown: state=f'🟡 Cooldown {cooldown}s'
+        else: state='🟢 فعال'
+        rows.append(f"{i+1}️⃣ {_mask_key(key)} — {state}")
+    return rows or ['❌ کلیدی تنظیم نشده است']
+
+def api_keys_detailed_text():
+    rows=api_stats_rows(); now=time.time()
+    lines=["🔑 <b>آمار دقیق OpenAI API — v5.16.1</b>",""]
+    if not rows:
+        return "\n".join(lines+["❌ هیچ کلیدی تنظیم نشده است."])
+    totals=[0]*8
+    active=cd=disabled=0
+    for r in rows:
+        idx,kh,state,total,succ,fail,fo,rl,auth,cli,serv,to,other,inp,out,tok,last,lasts,lasterr,dis_at,cool=r
+        cooldown=max(0,int((cool or 0)-now))
+        if idx in OPENAI_DISABLED_KEYS or state=='disabled': disabled+=1; icon='🔴'; label='غیرفعال'
+        elif cooldown: cd+=1; icon='🟡'; label=f'Cooldown {cooldown}s'
+        else: active+=1; icon='🟢'; label='فعال'
+        rate=(succ/total*100) if total else 0
+        lines += [f"<b>🔑 کلید #{idx+1}</b> — {_mask_key(OPENAI_KEYS[idx])} — {icon} {label}",
+                  f"درخواست: {total} | موفق: {succ} | ناموفق: {fail} | موفقیت: {rate:.2f}%",
+                  f"Failover: {fo} | 429: {rl} | 401/Auth: {auth} | 4xx: {cli} | 5xx: {serv} | Timeout: {to}",
+                  f"توکن ورودی: {inp:,} | خروجی: {out:,} | مجموع: {tok:,}",
+                  f"آخرین استفاده: {datetime.fromtimestamp(last).strftime('%Y-%m-%d %H:%M:%S') if last else '—'}",
+                  f"آخرین موفقیت: {datetime.fromtimestamp(lasts).strftime('%Y-%m-%d %H:%M:%S') if lasts else '—'}",
+                  f"آخرین خطا: {html.escape(str(lasterr or '—'))}",""]
+    all_rows=rows
+    total=sum(r[3] for r in all_rows); succ=sum(r[4] for r in all_rows); fail=sum(r[5] for r in all_rows); fo=sum(r[6] for r in all_rows); rl=sum(r[7] for r in all_rows); auth=sum(r[8] for r in all_rows); serv=sum(r[10] for r in all_rows); to=sum(r[11] for r in all_rows); tok=sum(r[15] for r in all_rows)
+    rate=succ/total*100 if total else 0
+    summary=["━━━━━━━━━━━━━━━━━━", "📊 <b>مجموع کلیدها</b>", f"کلیدها: {len(rows)} | 🟢 {active} | 🟡 {cd} | 🔴 {disabled}", f"درخواست: {total} | موفق: {succ} | ناموفق: {fail} | موفقیت: {rate:.2f}%", f"Failover: {fo} | 429: {rl} | 401/Auth: {auth} | 5xx: {serv} | Timeout: {to}", f"کل توکن ثبت‌شده: {tok:,}"]
+    return "\n".join(lines+summary)
 
 def editorial_dashboard_text():
     return (
-        "📊 <b>داشبورد تحریریه v5.8.0</b>\n\n"
+        "📊 <b>داشبورد تحریریه v5.16.1</b>\n\n"
         f"📰 پردازش‌شده: <b>{editorial_stats.get('processed',0)}</b>\n"
         f"📢 منتشرشده: <b>{editorial_stats.get('published',0)}</b>\n"
         f"♻️ تکراری: <b>{editorial_stats.get('duplicates',0)}</b>\n"
-        f"❌ ناموفق: <b>{editorial_stats.get('failed',0)}</b>\n"
-        f"🖼 تصویر موفق: <b>{editorial_stats.get('images_ok',0)}</b>\n"
-        f"🚨 Breaking: <b>{editorial_stats.get('breaking',0)}</b>\n"
-        f"🔎 Web Search: <b>{editorial_stats.get('web_search',0)}</b>\n"
-        f"🌐 چندمنبعی: <b>{editorial_stats.get('multi_source',0)}</b>\n"
-        f"✏️ اصلاحات: <b>{editorial_stats.get('edits',0)}</b>\n"
-        f"🔄 بازنویسی: <b>{editorial_stats.get('rewrites',0)}</b>\n"
-        f"📥 بیشترین صف: <b>{editorial_stats.get('queue_max',0)}</b>\n\n"
-        "🔑 <b>وضعیت کلیدها</b>\n" + "\n".join(key_health_snapshot())
+        f"❌ ناموفق: <b>{editorial_stats.get('failed',0)}</b>\n\n"
+        "🔑 <b>وضعیت API Key</b>\n" + "\n".join(key_health_snapshot()) + "\n\n"
+        "برای آمار کامل هر کلید: /keys"
     )
 
 
@@ -2739,7 +2839,10 @@ async def advanced_process_news(message, text):
             "related_sources": related, "quality": quality,
         })
         memory[:] = memory[-MAX_MEMORY:]
+        v515_knowledge_update(source, facts, story_id)
         save_memory(); save_editorial_state()
+        # Cache only the clean editorial result; never cache transient API errors.
+        v515_cache_put(url, text, {"post":post, "title":title, "body":body, "category":category_detail})
         prepared[user_id] = {
             "text": post, "image": str(image_path) if image_path else "",
             "source": source, "facts": facts, "title": title, "body": body,
@@ -2941,7 +3044,7 @@ async def dashboard_command(message: Message):
 @router.message(Command("keys"))
 async def keys_command(message: Message):
     if not is_admin(message): return
-    await message.answer("🔑 <b>وضعیت کلیدهای OpenAI</b>\n\n" + "\n".join(key_health_snapshot()), parse_mode=ParseMode.HTML)
+    await message.answer(api_keys_detailed_text(), parse_mode=ParseMode.HTML)
 
 
 @router.message(Command("queue"))
@@ -4147,7 +4250,7 @@ def v510_finalize_text(title, body):
 
 
 # ============================================================
-# V5.12.0 — GAMEFA BRAIN
+# V5.15.0 — GAMEFA BRAIN
 # ============================================================
 
 def cosine_similarity(a, b):
@@ -4501,7 +4604,7 @@ async def v512_fact_check(source, facts, title, body, related):
         passed=bool(data.get("pass")) and conf>=FACT_CHECK_MIN_CONFIDENCE and not critical and not unsupported
         return {"pass":passed,"confidence":conf,"status":clean_text(str(data.get("status") or v512_status(source,facts))),"issues":issues,"unsupported_claims":unsupported,"critical_errors":critical}
     except Exception as e:
-        log.warning("V5.12 Fact Check failed: %s",e)
+        log.warning("V5.15.0 Fact Check failed: %s",e)
         return {"pass":False,"confidence":0.0,"status":v512_status(source,facts),"issues":["Fact Check در دسترس نبود"],"unsupported_claims":[],"critical_errors":[]}
 
 
@@ -4552,9 +4655,11 @@ async def v511_process_news(message, text):
             return
 
         if status: await status.edit_text("🧠 مرحله ۲/۸ — استخراج واقعیت‌های قفل‌شده...")
-        facts=await extract_facts(source)
+        facts, related = await asyncio.gather(
+            extract_facts(source),
+            multi_source_research(source),
+        )
         facts["v511"]={"semantic_duplicate_checked":True}
-        related=await multi_source_research(source)
         source["related_sources"]=related
         story_matches=v512_story_memory(source,facts)
         related_archive=v59_related_archive(source,facts) if "v59_related_archive" in globals() else []
@@ -4639,12 +4744,36 @@ async def v511_process_news(message, text):
         strict_ok,strict_issues=v512_strict_validate(title,body,source,facts,fact_check)
         if ENABLE_STRICT_VALIDATOR and not strict_ok:
             raise RuntimeError("اعتبارسنجی نهایی خبر ناموفق بود: " + " | ".join(strict_issues[:4]))
+        # V5.15 Precision Engine: final editorial sanitation before ANY publish.
+        title, body, category_detail = v515_final_sanitize(title, body, source, facts)
+        if not title or not body:
+            raise RuntimeError("V5.15 Validator: متن نهایی معتبر نیست.")
+        if v515_source_age_warning(source):
+            stat_inc("stale_rejected")
+            if status:
+                try: await status.delete()
+                except Exception: pass
+            return
+        provenance = v515_source_provenance(source)
+        if not provenance["trusted"] and source.get("url") and not source.get("web_search_used"):
+            # Unknown sources are allowed only when the article itself provides enough facts.
+            if not facts:
+                stat_inc("weak_sources_rejected")
+                if status:
+                    try: await status.delete()
+                    except Exception: pass
+                return
         if not body:
             raise RuntimeError("کنترل کیفیت اجازه ارسال متن خالی را نداد.")
 
         if status: await status.edit_text("🖼 مرحله ۶/۸ — انتخاب بهترین تصویر...")
         image_path=await smart_image_download_v511(source)
         image_score=float(source.get("selected_image_score",0) or 0)
+        if image_path:
+            source["image_relevance_score"]=max(
+                image_score,
+                v515_relevance_image(source, source.get("selected_image_url") or source.get("image",""))
+            )
         breaking=is_breaking(source,facts)
         if breaking: stat_inc("breaking")
         spoiler=detect_spoiler(source,facts)
@@ -4712,7 +4841,7 @@ async def debug_command_v511(message: Message):
     if not is_admin(message): return
     results=await v56_health_check()
     await message.answer(
-        "🛠 <b>Gamefa Bot Debug v5.12.0</b>\n\n"
+        "🛠 <b>Gamefa Bot Debug v5.16.1</b>\n\n"
         f"🤖 مدل: <code>{escape_html(MODEL)}</code>\n"
         f"🧠 AI Editor: {'🟢' if AI_EDITOR_ENABLED else '🔴'}\n"
         f"🧬 Semantic Duplicate: {'🟢' if ENABLE_SEMANTIC_DUPLICATE else '🔴'}\n"
@@ -4747,6 +4876,43 @@ async def modes_command_v511(message: Message):
     await message.answer("\n".join(lines),parse_mode=ParseMode.HTML,reply_markup=main_keyboard())
 
 
+
+@router.message(Command("dryrun"))
+async def v515_dryrun_command(message: Message):
+    if not is_admin(message):
+        return
+    raw=(message.text or "").strip()
+    url=extract_url(raw)
+    if not url:
+        await message.answer("❌ بعد از /dryrun یک لینک خبر بفرستید.", reply_markup=main_keyboard())
+        return
+    try:
+        result=await v515_dry_run(message, raw)
+        if not result:
+            await message.answer("❌ خروجی آزمایشی معتبر تولید نشد.", reply_markup=main_keyboard())
+            return
+        await message.answer(result, parse_mode=ParseMode.HTML, reply_markup=main_keyboard())
+    except Exception as e:
+        log.exception("V5.15 dryrun failed")
+        await message.answer("❌ Dry Run خطا داد: "+str(e)[:900], reply_markup=main_keyboard())
+
+@router.message(Command("search"))
+async def v515_search_command(message: Message):
+    if not is_admin(message):
+        return
+    q=(message.text or "").partition(" ")[2].strip()
+    if not q:
+        await message.answer("❌ بعد از /search عبارت جست‌وجو را بنویسید.", reply_markup=main_keyboard())
+        return
+    hits=v515_search_memory(q)
+    if not hits:
+        await message.answer("🔎 موردی پیدا نشد.", reply_markup=main_keyboard())
+        return
+    lines=["🔎 <b>نتایج آرشیو Gamefa</b>",""]
+    for i,item in enumerate(hits[-10:],1):
+        lines.append(f"{i}. {escape_html(str(item.get('title') or 'بدون تیتر'))}")
+    await message.answer("\n".join(lines), parse_mode=ParseMode.HTML, reply_markup=main_keyboard())
+
 # موتور v5.11 جایگزین pipeline قبلی می‌شود؛ Preview و Hot-News رتبه‌بندی حذف‌شده‌اند.
 process_news = v511_process_news
 advanced_process_news = v511_process_news
@@ -4771,6 +4937,7 @@ async def main():
             "هیچ OPENAI_API_KEY تنظیم نشده است."
         )
 
+    api_stats_init()
     load_memory()
     load_editorial_state()
 
@@ -4825,10 +4992,277 @@ DISABLED_FEATURES_V531 = {
 
 
 def version_feature_policy():
-    """سیاست قابلیت‌های غیرفعال نسخه 5.7.0."""
+    """سیاست قابلیت‌های غیرفعال نسخه 5.15.0."""
     return {
         "version": BOT_VERSION,
         "hashtags": "disabled",
         "channel_publish": "disabled",
         "mode_switch_ui": "disabled",
     }
+# ============================================================
+# V5.15.0 PRECISION EDITORIAL ENGINE
+# ============================================================
+V515_CACHE_FILE = os.getenv("V515_CACHE_FILE", "gamefa_v515_cache.json")
+V515_KNOWLEDGE_FILE = os.getenv("V515_KNOWLEDGE_FILE", "gamefa_v515_knowledge.json")
+V515_DRY_RUN = os.getenv("V515_DRY_RUN", "0").lower() in {"1","true","yes"}
+V515_STALE_DAYS = int(os.getenv("V515_STALE_DAYS", "14"))
+V515_SOURCE_MIN_QUALITY = float(os.getenv("V515_SOURCE_MIN_QUALITY", "0.35"))
+V515_MAX_BODY_SENTENCES = min(10, max(1, int(os.getenv("V515_MAX_BODY_SENTENCES", "10"))))
+
+V515_FILLER_PATTERNS = [
+    r"در یک توسعه (?:قابل توجه|مهم|جالب)",
+    r"این موضوع نشان(?:دهنده| می‌دهد) که",
+    r"انتظار می‌رود(?: که)?",
+    r"به نظر می‌رسد(?: که)?",
+    r"در همین راستا",
+    r"گامی مهم در",
+    r"می‌تواند تأثیر (?:زیادی|قابل توجهی) داشته باشد",
+    r"طرفداران .* احتمالاً",
+    r"بدون شک",
+    r"در نهایت،",
+    r"همان‌طور که می‌دانیم",
+]
+V515_CTA_PATTERNS = [
+    r"نظر شما چیست", r"نظرتان چیست", r"به نظر شما", r"منتظر .* هستید",
+    r"در بخش نظرات", r"کامنت بگذار", r"دیدگاه خود را", r"با ما در میان بگذار",
+    r"نظر خود را", r"لایک کنید", r"عضو شوید", r"دنبال کنید",
+]
+V515_EVENT_RULES = [
+    (100, "cancellation", ["لغو شد","لغو شده","کنسل شد","canceled","cancelled"]),
+    (95, "shutdown", ["تعطیل شد","تعطیلی استودیو","بسته شد","shutdown"]),
+    (92, "acquisition", ["خریداری کرد","خریداری شد","خرید شرکت","acquired","acquisition"]),
+    (90, "delay", ["تاخیر خورد","تأخیر خورد","به تعویق افتاد","تأخیر خورد"]),
+    (88, "release_date", ["تاریخ انتشار","تاریخ عرضه","release date"]),
+    (86, "release", ["منتشر شد","عرضه شد","در دسترس قرار گرفت","released","launch"]),
+    (84, "announcement", ["معرفی شد","رونمایی شد","اعلام کرد","اعلام شد","announced"]),
+    (82, "update", ["به‌روزرسانی","به روزرسانی","آپدیت","update","patch"]),
+    (80, "scores", ["نمرات","امتیازات","متاکریتیک","metacritic","review scores"]),
+    (78, "trailer", ["تریلر","trailer","teaser"]),
+    (75, "rumor", ["شایعه","گزارش شده","گزارش‌ها","reportedly","rumor","rumour"]),
+]
+V515_CATEGORY_SUBTYPES = {
+    "🎮": ["بازی","گیم‌پلی","کنسول","استودیو","ناشر","DLC","آپدیت","تأخیر","لغو","نمرات","فروش"],
+    "🎥": ["فیلم","سریال","بازیگر","کارگردان","اکران","تریلر","گیشه","فصل","نتفلیکس"],
+    "📢": ["فناوری","هوش مصنوعی","موبایل","سخت‌افزار","اقتصاد","شرکت","اینترنت","شبکه اجتماعی"],
+}
+
+def _v515_load_json(path, default):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            value=json.load(f)
+        return value
+    except Exception:
+        return default
+
+def _v515_save_json(path, value):
+    tmp=path+".tmp"
+    try:
+        with open(tmp,"w",encoding="utf-8") as f:
+            json.dump(value,f,ensure_ascii=False,indent=2)
+        os.replace(tmp,path)
+    except Exception as e:
+        log.warning("V5.15 persistence failed for %s: %s", path, e)
+
+V515_CACHE = _v515_load_json(V515_CACHE_FILE, {})
+V515_KNOWLEDGE = _v515_load_json(V515_KNOWLEDGE_FILE, {"entities": {}, "stories": {}})
+
+def v515_event_type(text):
+    low=str(text or "").lower()
+    best=(0,"general")
+    for priority,name,terms in V515_EVENT_RULES:
+        if any(t.lower() in low for t in terms):
+            if priority > best[0]:
+                best=(priority,name)
+    return best[1]
+
+def v515_category_detail(text, facts=None):
+    raw=str(text or "")
+    cat=detect_category(raw, facts)
+    event=v515_event_type(raw)
+    subtype="عمومی"
+    if cat=="🎮":
+        if "تاریخ انتشار" in raw or "release date" in raw.lower(): subtype="تاریخ انتشار"
+        elif event=="cancellation": subtype="لغو"
+        elif event=="delay": subtype="تأخیر"
+        elif event=="update": subtype="به‌روزرسانی"
+        elif event=="trailer": subtype="تریلر"
+        elif event=="scores": subtype="نمرات"
+        elif "فروش" in raw or "sales" in raw.lower(): subtype="فروش"
+        elif "کنسول" in raw or "playstation" in raw.lower() or "xbox" in raw.lower(): subtype="کنسول"
+        else: subtype="بازی"
+    elif cat=="🎥":
+        if event=="trailer": subtype="تریلر"
+        elif "اکران" in raw or "box office" in raw.lower(): subtype="اکران/گیشه"
+        elif "بازیگر" in raw or "actor" in raw.lower() or "casting" in raw.lower(): subtype="بازیگر"
+        elif "سریال" in raw or "season" in raw.lower(): subtype="سریال"
+        else: subtype="فیلم"
+    else:
+        if "هوش مصنوعی" in raw or "artificial intelligence" in raw.lower() or " ai " in (" "+raw.lower()+" "): subtype="هوش مصنوعی"
+        elif "موبایل" in raw or "iphone" in raw.lower() or "android" in raw.lower(): subtype="موبایل"
+        elif "سخت‌افزار" in raw or "gpu" in raw.lower() or "cpu" in raw.lower(): subtype="سخت‌افزار"
+        elif "فناوری" in raw or "technology" in raw.lower(): subtype="فناوری"
+        else: subtype="متفرقه"
+    return {"sticker":cat,"subtype":subtype,"event":event}
+
+def v515_strip_editorial_noise(text):
+    s=str(text or "")
+    for pat in V515_FILLER_PATTERNS+V515_CTA_PATTERNS:
+        s=re.sub(pat, "", s, flags=re.I)
+    s=re.sub(r"(?m)^\s*(?:نظر شما|نظرتان|به نظر شما).*$","",s,flags=re.I)
+    s=re.sub(r"(?m)^\s*[-•]\s*(?:منبع|Source|منابع).*$","",s,flags=re.I)
+    s=re.sub(r"(?m)^\s*#+.*$","",s)
+    return re.sub(r"[ \t]{2,}"," ",s).strip()
+
+def v515_unique_sentences(sentences):
+    out=[]
+    seen=[]
+    for s in sentences or []:
+        c=clean_sentence(str(s or ""))
+        if not c: continue
+        n=norm(c)
+        if not n: continue
+        if any(word_similarity(n, old) >= 0.88 for old in seen):
+            continue
+        out.append(c); seen.append(n)
+    return out[:V515_MAX_BODY_SENTENCES]
+
+def v515_claim_lock(source, facts, body):
+    """محافظ ساده: اعداد/تاریخ‌های متن باید در منبع یا facts دیده شوند."""
+    src=(str(source.get("title",""))+" "+str(source.get("description",""))+" "+str(source.get("body",""))).lower()
+    fact_blob=json.dumps(facts or {},ensure_ascii=False).lower()
+    hay=src+" "+fact_blob
+    tokens=re.findall(r"\b\d{1,4}(?:[./-]\d{1,4}){0,2}\b", str(body or ""))
+    return [t for t in tokens if t.lower() not in hay]
+
+def v515_source_age_warning(source):
+    dates=[]
+    for key in ("published","date","published_at","modified","modified_at"):
+        value=source.get(key)
+        if value: dates.append(str(value))
+    if not dates: return False
+    # Only reject when an explicit ISO-like date is clearly old.
+    from datetime import datetime, timezone
+    now=datetime.now(timezone.utc)
+    for raw in dates:
+        m=re.search(r"(20\d{2})[-/](\d{1,2})[-/](\d{1,2})", raw)
+        if m:
+            try:
+                dt=datetime(int(m.group(1)),int(m.group(2)),int(m.group(3)),tzinfo=timezone.utc)
+                return (now-dt).days > V515_STALE_DAYS
+            except Exception: pass
+    return False
+
+def v515_source_provenance(source):
+    domain=source_domain(source.get("url","") or source.get("domain",""))
+    quality=float(source_quality(domain) or 0)
+    return {"domain":domain,"quality":quality,"trusted":quality>=V515_SOURCE_MIN_QUALITY}
+
+def v515_knowledge_update(source, facts, story_id=None):
+    entities=V515_KNOWLEDGE.setdefault("entities",{})
+    for key in ("game","title","name","developer","publisher","studio","company"):
+        val=facts.get(key) if isinstance(facts,dict) else None
+        if isinstance(val,str) and val.strip():
+            entities.setdefault(norm(val),{"name":val.strip(),"last_seen":int(time.time())})
+    if story_id:
+        stories=V515_KNOWLEDGE.setdefault("stories",{})
+        stories.setdefault(str(story_id),{"created_at":int(time.time()),"updates":0})
+        stories[str(story_id)]["updates"]=int(stories[str(story_id)].get("updates",0))+1
+    _v515_save_json(V515_KNOWLEDGE_FILE,V515_KNOWLEDGE)
+
+def v515_cache_key(url, text=""):
+    raw=(str(url or "")+"|"+norm(text)[:6000]).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
+
+def v515_cache_get(url, text=""):
+    if not url and not text: return None
+    item=V515_CACHE.get(v515_cache_key(url,text))
+    if isinstance(item,dict) and int(time.time())-int(item.get("ts",0)) < 86400:
+        return item
+    return None
+
+def v515_cache_put(url, text, value):
+    if not url and not text: return
+    V515_CACHE[v515_cache_key(url,text)]={"ts":int(time.time()),"value":value}
+    if len(V515_CACHE)>500:
+        old=sorted(V515_CACHE.items(),key=lambda kv:int(kv[1].get("ts",0)))[:100]
+        for k,_ in old: V515_CACHE.pop(k,None)
+    _v515_save_json(V515_CACHE_FILE,V515_CACHE)
+
+def v515_relevance_image(source, image_url):
+    if not image_url: return 0
+    title=norm(source.get("title",""))
+    url=norm(image_url)
+    score=0
+    for token in title.split():
+        if len(token)>=4 and token in url: score+=12
+    if source.get("image") and image_url==source.get("image"): score+=20
+    return min(100,score+40)
+
+def v515_final_sanitize(title, body, source, facts):
+    title=v515_strip_editorial_noise(clean_sentence(title))
+    body=v515_strip_editorial_noise(body)
+    # remove accidental category/sticker prefixes; one canonical sticker is added below.
+    title=re.sub(r"^(?:🎮|🎥|📢)\s*","",title)
+    sentences=v515_unique_sentences(split_sentences("x\n"+body)[1])
+    # split_sentences can treat the first synthetic title as title; preserve the actual body with sentence splitter.
+    if not sentences:
+        sentences=[clean_sentence(x) for x in re.split(r"(?<=[.!؟])\s+",body) if clean_sentence(x)]
+        sentences=v515_unique_sentences(sentences)
+    sentences=[ensure_persian_start(s,False) for s in sentences if s]
+    sentences=[s for s in sentences if s and not any(re.search(p,s,re.I) for p in V515_CTA_PATTERNS)]
+    sentences=sentences[:V515_MAX_BODY_SENTENCES]
+    detail=v515_category_detail(title+" "+" ".join(sentences),facts)
+    # Strict numeric claim lock: do not silently invent numbers.
+    unsupported=v515_claim_lock(source,facts," ".join(sentences))
+    if unsupported:
+        for num in unsupported:
+            sentences=[re.sub(rf"(?<!\w){re.escape(num)}(?!\w)","",s) for s in sentences]
+    body=" ".join(s.strip() for s in sentences if s.strip())
+    if not title or not body:
+        return "", "", detail
+    return title,body,detail
+
+async def v515_dry_run(message, text):
+    """ادمین می‌تواند با /dryrun URL خروجی را بدون انتشار آزمایش کند."""
+    url=extract_url(text)
+    source=await fetch_article(url) if url else {"url":"","domain":"manual","title":"","description":"","body":text,"image":""}
+    facts=await extract_facts(source)
+    generated=await v59_generate(source,facts,[],[],normalize_mode(WRITING_MODE))
+    title,sents=split_sentences(generated)
+    title,body,_=v515_final_sanitize(title," ".join(sents),source,facts)
+    return format_post((title+"\n"+body) if title and body else "")
+
+def v515_search_memory(query):
+    q=norm(query)
+    hits=[]
+    for item in memory:
+        hay=norm(str(item.get("title",""))+" "+str(item.get("source",""))+" "+str(item.get("post","")))
+        if q and q in hay:
+            hits.append(item)
+    return hits[-20:]
+
+
+
+
+# ============================================================
+# V5.15.0 FEATURE POLICY
+# ============================================================
+V515_FEATURE_POLICY = {
+    "gamefa_writing_dna": True,
+    "two_stage_ai": True,
+    "fact_lock": True,
+    "strict_validator": True,
+    "story_memory": True,
+    "update_vs_duplicate": True,
+    "source_provenance": True,
+    "stale_news_detection": True,
+    "image_relevance": True,
+    "parallel_independent_steps": True,
+    "persistent_key_failover": True,
+    "cache": True,
+    "dry_run": True,
+    "archive_search": True,
+    "three_stickers_only": True,
+    "no_cta": True,
+    "no_post_status": True,
+}
