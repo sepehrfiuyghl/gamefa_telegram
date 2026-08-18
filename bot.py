@@ -36,7 +36,7 @@ from openai import AsyncOpenAI
 
 
 # ============================================================
-# GAMEFA BOT v5.12.0
+# GAMEFA BOT v5.15.0
 # ============================================================
 # امکانات:
 # - پشتیبانی از لینک Gamefa و سایت‌های خبری دیگر
@@ -49,7 +49,7 @@ from openai import AsyncOpenAI
 # - Railway friendly
 # ============================================================
 
-BOT_VERSION = "v5.12.0"
+BOT_VERSION = "v5.15.0"
 # v5.11.0: تیتر بدون محدودیت تعداد کلمه
 # طول تیتر فقط با دقت، روانی و ارتباط با خبر کنترل می‌شود.
 HEADLINE_WORD_LIMIT = None
@@ -102,7 +102,7 @@ STATS_FILE = Path(os.getenv("STATS_FILE", "editorial_stats.json"))
 MAX_QUEUE = int(os.getenv("MAX_QUEUE", "20"))
 
 # ============================================================
-# V5.12 GAMEFA BRAIN / FACT CHECK / STORY MEMORY
+# V5.15.0 GAMEFA BRAIN / FACT CHECK / STORY MEMORY
 # ============================================================
 ENABLE_FACT_CHECK = os.getenv("ENABLE_FACT_CHECK", "1").strip().lower() in ("1", "true", "yes", "on")
 FACT_CHECK_MIN_CONFIDENCE = float(os.getenv("FACT_CHECK_MIN_CONFIDENCE", "0.82"))
@@ -2739,7 +2739,10 @@ async def advanced_process_news(message, text):
             "related_sources": related, "quality": quality,
         })
         memory[:] = memory[-MAX_MEMORY:]
+        v515_knowledge_update(source, facts, story_id)
         save_memory(); save_editorial_state()
+        # Cache only the clean editorial result; never cache transient API errors.
+        v515_cache_put(url, text, {"post":post, "title":title, "body":body, "category":category_detail})
         prepared[user_id] = {
             "text": post, "image": str(image_path) if image_path else "",
             "source": source, "facts": facts, "title": title, "body": body,
@@ -4147,7 +4150,7 @@ def v510_finalize_text(title, body):
 
 
 # ============================================================
-# V5.12.0 — GAMEFA BRAIN
+# V5.15.0 — GAMEFA BRAIN
 # ============================================================
 
 def cosine_similarity(a, b):
@@ -4501,7 +4504,7 @@ async def v512_fact_check(source, facts, title, body, related):
         passed=bool(data.get("pass")) and conf>=FACT_CHECK_MIN_CONFIDENCE and not critical and not unsupported
         return {"pass":passed,"confidence":conf,"status":clean_text(str(data.get("status") or v512_status(source,facts))),"issues":issues,"unsupported_claims":unsupported,"critical_errors":critical}
     except Exception as e:
-        log.warning("V5.12 Fact Check failed: %s",e)
+        log.warning("V5.15.0 Fact Check failed: %s",e)
         return {"pass":False,"confidence":0.0,"status":v512_status(source,facts),"issues":["Fact Check در دسترس نبود"],"unsupported_claims":[],"critical_errors":[]}
 
 
@@ -4552,9 +4555,11 @@ async def v511_process_news(message, text):
             return
 
         if status: await status.edit_text("🧠 مرحله ۲/۸ — استخراج واقعیت‌های قفل‌شده...")
-        facts=await extract_facts(source)
+        facts, related = await asyncio.gather(
+            extract_facts(source),
+            multi_source_research(source),
+        )
         facts["v511"]={"semantic_duplicate_checked":True}
-        related=await multi_source_research(source)
         source["related_sources"]=related
         story_matches=v512_story_memory(source,facts)
         related_archive=v59_related_archive(source,facts) if "v59_related_archive" in globals() else []
@@ -4639,12 +4644,36 @@ async def v511_process_news(message, text):
         strict_ok,strict_issues=v512_strict_validate(title,body,source,facts,fact_check)
         if ENABLE_STRICT_VALIDATOR and not strict_ok:
             raise RuntimeError("اعتبارسنجی نهایی خبر ناموفق بود: " + " | ".join(strict_issues[:4]))
+        # V5.15 Precision Engine: final editorial sanitation before ANY publish.
+        title, body, category_detail = v515_final_sanitize(title, body, source, facts)
+        if not title or not body:
+            raise RuntimeError("V5.15 Validator: متن نهایی معتبر نیست.")
+        if v515_source_age_warning(source):
+            stat_inc("stale_rejected")
+            if status:
+                try: await status.delete()
+                except Exception: pass
+            return
+        provenance = v515_source_provenance(source)
+        if not provenance["trusted"] and source.get("url") and not source.get("web_search_used"):
+            # Unknown sources are allowed only when the article itself provides enough facts.
+            if not facts:
+                stat_inc("weak_sources_rejected")
+                if status:
+                    try: await status.delete()
+                    except Exception: pass
+                return
         if not body:
             raise RuntimeError("کنترل کیفیت اجازه ارسال متن خالی را نداد.")
 
         if status: await status.edit_text("🖼 مرحله ۶/۸ — انتخاب بهترین تصویر...")
         image_path=await smart_image_download_v511(source)
         image_score=float(source.get("selected_image_score",0) or 0)
+        if image_path:
+            source["image_relevance_score"]=max(
+                image_score,
+                v515_relevance_image(source, source.get("selected_image_url") or source.get("image",""))
+            )
         breaking=is_breaking(source,facts)
         if breaking: stat_inc("breaking")
         spoiler=detect_spoiler(source,facts)
@@ -4712,7 +4741,7 @@ async def debug_command_v511(message: Message):
     if not is_admin(message): return
     results=await v56_health_check()
     await message.answer(
-        "🛠 <b>Gamefa Bot Debug v5.12.0</b>\n\n"
+        "🛠 <b>Gamefa Bot Debug v5.15.0</b>\n\n"
         f"🤖 مدل: <code>{escape_html(MODEL)}</code>\n"
         f"🧠 AI Editor: {'🟢' if AI_EDITOR_ENABLED else '🔴'}\n"
         f"🧬 Semantic Duplicate: {'🟢' if ENABLE_SEMANTIC_DUPLICATE else '🔴'}\n"
@@ -4746,6 +4775,43 @@ async def modes_command_v511(message: Message):
         lines.append(f"• <code>{key}</code> — {escape_html(desc)}")
     await message.answer("\n".join(lines),parse_mode=ParseMode.HTML,reply_markup=main_keyboard())
 
+
+
+@router.message(Command("dryrun"))
+async def v515_dryrun_command(message: Message):
+    if not is_admin(message):
+        return
+    raw=(message.text or "").strip()
+    url=extract_url(raw)
+    if not url:
+        await message.answer("❌ بعد از /dryrun یک لینک خبر بفرستید.", reply_markup=main_keyboard())
+        return
+    try:
+        result=await v515_dry_run(message, raw)
+        if not result:
+            await message.answer("❌ خروجی آزمایشی معتبر تولید نشد.", reply_markup=main_keyboard())
+            return
+        await message.answer(result, parse_mode=ParseMode.HTML, reply_markup=main_keyboard())
+    except Exception as e:
+        log.exception("V5.15 dryrun failed")
+        await message.answer("❌ Dry Run خطا داد: "+str(e)[:900], reply_markup=main_keyboard())
+
+@router.message(Command("search"))
+async def v515_search_command(message: Message):
+    if not is_admin(message):
+        return
+    q=(message.text or "").partition(" ")[2].strip()
+    if not q:
+        await message.answer("❌ بعد از /search عبارت جست‌وجو را بنویسید.", reply_markup=main_keyboard())
+        return
+    hits=v515_search_memory(q)
+    if not hits:
+        await message.answer("🔎 موردی پیدا نشد.", reply_markup=main_keyboard())
+        return
+    lines=["🔎 <b>نتایج آرشیو Gamefa</b>",""]
+    for i,item in enumerate(hits[-10:],1):
+        lines.append(f"{i}. {escape_html(str(item.get('title') or 'بدون تیتر'))}")
+    await message.answer("\n".join(lines), parse_mode=ParseMode.HTML, reply_markup=main_keyboard())
 
 # موتور v5.11 جایگزین pipeline قبلی می‌شود؛ Preview و Hot-News رتبه‌بندی حذف‌شده‌اند.
 process_news = v511_process_news
@@ -4825,10 +4891,277 @@ DISABLED_FEATURES_V531 = {
 
 
 def version_feature_policy():
-    """سیاست قابلیت‌های غیرفعال نسخه 5.7.0."""
+    """سیاست قابلیت‌های غیرفعال نسخه 5.15.0."""
     return {
         "version": BOT_VERSION,
         "hashtags": "disabled",
         "channel_publish": "disabled",
         "mode_switch_ui": "disabled",
     }
+# ============================================================
+# V5.15.0 PRECISION EDITORIAL ENGINE
+# ============================================================
+V515_CACHE_FILE = os.getenv("V515_CACHE_FILE", "gamefa_v515_cache.json")
+V515_KNOWLEDGE_FILE = os.getenv("V515_KNOWLEDGE_FILE", "gamefa_v515_knowledge.json")
+V515_DRY_RUN = os.getenv("V515_DRY_RUN", "0").lower() in {"1","true","yes"}
+V515_STALE_DAYS = int(os.getenv("V515_STALE_DAYS", "14"))
+V515_SOURCE_MIN_QUALITY = float(os.getenv("V515_SOURCE_MIN_QUALITY", "0.35"))
+V515_MAX_BODY_SENTENCES = min(10, max(1, int(os.getenv("V515_MAX_BODY_SENTENCES", "10"))))
+
+V515_FILLER_PATTERNS = [
+    r"در یک توسعه (?:قابل توجه|مهم|جالب)",
+    r"این موضوع نشان(?:دهنده| می‌دهد) که",
+    r"انتظار می‌رود(?: که)?",
+    r"به نظر می‌رسد(?: که)?",
+    r"در همین راستا",
+    r"گامی مهم در",
+    r"می‌تواند تأثیر (?:زیادی|قابل توجهی) داشته باشد",
+    r"طرفداران .* احتمالاً",
+    r"بدون شک",
+    r"در نهایت،",
+    r"همان‌طور که می‌دانیم",
+]
+V515_CTA_PATTERNS = [
+    r"نظر شما چیست", r"نظرتان چیست", r"به نظر شما", r"منتظر .* هستید",
+    r"در بخش نظرات", r"کامنت بگذار", r"دیدگاه خود را", r"با ما در میان بگذار",
+    r"نظر خود را", r"لایک کنید", r"عضو شوید", r"دنبال کنید",
+]
+V515_EVENT_RULES = [
+    (100, "cancellation", ["لغو شد","لغو شده","کنسل شد","canceled","cancelled"]),
+    (95, "shutdown", ["تعطیل شد","تعطیلی استودیو","بسته شد","shutdown"]),
+    (92, "acquisition", ["خریداری کرد","خریداری شد","خرید شرکت","acquired","acquisition"]),
+    (90, "delay", ["تاخیر خورد","تأخیر خورد","به تعویق افتاد","تأخیر خورد"]),
+    (88, "release_date", ["تاریخ انتشار","تاریخ عرضه","release date"]),
+    (86, "release", ["منتشر شد","عرضه شد","در دسترس قرار گرفت","released","launch"]),
+    (84, "announcement", ["معرفی شد","رونمایی شد","اعلام کرد","اعلام شد","announced"]),
+    (82, "update", ["به‌روزرسانی","به روزرسانی","آپدیت","update","patch"]),
+    (80, "scores", ["نمرات","امتیازات","متاکریتیک","metacritic","review scores"]),
+    (78, "trailer", ["تریلر","trailer","teaser"]),
+    (75, "rumor", ["شایعه","گزارش شده","گزارش‌ها","reportedly","rumor","rumour"]),
+]
+V515_CATEGORY_SUBTYPES = {
+    "🎮": ["بازی","گیم‌پلی","کنسول","استودیو","ناشر","DLC","آپدیت","تأخیر","لغو","نمرات","فروش"],
+    "🎥": ["فیلم","سریال","بازیگر","کارگردان","اکران","تریلر","گیشه","فصل","نتفلیکس"],
+    "📢": ["فناوری","هوش مصنوعی","موبایل","سخت‌افزار","اقتصاد","شرکت","اینترنت","شبکه اجتماعی"],
+}
+
+def _v515_load_json(path, default):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            value=json.load(f)
+        return value
+    except Exception:
+        return default
+
+def _v515_save_json(path, value):
+    tmp=path+".tmp"
+    try:
+        with open(tmp,"w",encoding="utf-8") as f:
+            json.dump(value,f,ensure_ascii=False,indent=2)
+        os.replace(tmp,path)
+    except Exception as e:
+        log.warning("V5.15 persistence failed for %s: %s", path, e)
+
+V515_CACHE = _v515_load_json(V515_CACHE_FILE, {})
+V515_KNOWLEDGE = _v515_load_json(V515_KNOWLEDGE_FILE, {"entities": {}, "stories": {}})
+
+def v515_event_type(text):
+    low=str(text or "").lower()
+    best=(0,"general")
+    for priority,name,terms in V515_EVENT_RULES:
+        if any(t.lower() in low for t in terms):
+            if priority > best[0]:
+                best=(priority,name)
+    return best[1]
+
+def v515_category_detail(text, facts=None):
+    raw=str(text or "")
+    cat=detect_category(raw, facts)
+    event=v515_event_type(raw)
+    subtype="عمومی"
+    if cat=="🎮":
+        if "تاریخ انتشار" in raw or "release date" in raw.lower(): subtype="تاریخ انتشار"
+        elif event=="cancellation": subtype="لغو"
+        elif event=="delay": subtype="تأخیر"
+        elif event=="update": subtype="به‌روزرسانی"
+        elif event=="trailer": subtype="تریلر"
+        elif event=="scores": subtype="نمرات"
+        elif "فروش" in raw or "sales" in raw.lower(): subtype="فروش"
+        elif "کنسول" in raw or "playstation" in raw.lower() or "xbox" in raw.lower(): subtype="کنسول"
+        else: subtype="بازی"
+    elif cat=="🎥":
+        if event=="trailer": subtype="تریلر"
+        elif "اکران" in raw or "box office" in raw.lower(): subtype="اکران/گیشه"
+        elif "بازیگر" in raw or "actor" in raw.lower() or "casting" in raw.lower(): subtype="بازیگر"
+        elif "سریال" in raw or "season" in raw.lower(): subtype="سریال"
+        else: subtype="فیلم"
+    else:
+        if "هوش مصنوعی" in raw or "artificial intelligence" in raw.lower() or " ai " in (" "+raw.lower()+" "): subtype="هوش مصنوعی"
+        elif "موبایل" in raw or "iphone" in raw.lower() or "android" in raw.lower(): subtype="موبایل"
+        elif "سخت‌افزار" in raw or "gpu" in raw.lower() or "cpu" in raw.lower(): subtype="سخت‌افزار"
+        elif "فناوری" in raw or "technology" in raw.lower(): subtype="فناوری"
+        else: subtype="متفرقه"
+    return {"sticker":cat,"subtype":subtype,"event":event}
+
+def v515_strip_editorial_noise(text):
+    s=str(text or "")
+    for pat in V515_FILLER_PATTERNS+V515_CTA_PATTERNS:
+        s=re.sub(pat, "", s, flags=re.I)
+    s=re.sub(r"(?m)^\s*(?:نظر شما|نظرتان|به نظر شما).*$","",s,flags=re.I)
+    s=re.sub(r"(?m)^\s*[-•]\s*(?:منبع|Source|منابع).*$","",s,flags=re.I)
+    s=re.sub(r"(?m)^\s*#+.*$","",s)
+    return re.sub(r"[ \t]{2,}"," ",s).strip()
+
+def v515_unique_sentences(sentences):
+    out=[]
+    seen=[]
+    for s in sentences or []:
+        c=clean_sentence(str(s or ""))
+        if not c: continue
+        n=norm(c)
+        if not n: continue
+        if any(word_similarity(n, old) >= 0.88 for old in seen):
+            continue
+        out.append(c); seen.append(n)
+    return out[:V515_MAX_BODY_SENTENCES]
+
+def v515_claim_lock(source, facts, body):
+    """محافظ ساده: اعداد/تاریخ‌های متن باید در منبع یا facts دیده شوند."""
+    src=(str(source.get("title",""))+" "+str(source.get("description",""))+" "+str(source.get("body",""))).lower()
+    fact_blob=json.dumps(facts or {},ensure_ascii=False).lower()
+    hay=src+" "+fact_blob
+    tokens=re.findall(r"\b\d{1,4}(?:[./-]\d{1,4}){0,2}\b", str(body or ""))
+    return [t for t in tokens if t.lower() not in hay]
+
+def v515_source_age_warning(source):
+    dates=[]
+    for key in ("published","date","published_at","modified","modified_at"):
+        value=source.get(key)
+        if value: dates.append(str(value))
+    if not dates: return False
+    # Only reject when an explicit ISO-like date is clearly old.
+    from datetime import datetime, timezone
+    now=datetime.now(timezone.utc)
+    for raw in dates:
+        m=re.search(r"(20\d{2})[-/](\d{1,2})[-/](\d{1,2})", raw)
+        if m:
+            try:
+                dt=datetime(int(m.group(1)),int(m.group(2)),int(m.group(3)),tzinfo=timezone.utc)
+                return (now-dt).days > V515_STALE_DAYS
+            except Exception: pass
+    return False
+
+def v515_source_provenance(source):
+    domain=source_domain(source.get("url","") or source.get("domain",""))
+    quality=float(source_quality(domain) or 0)
+    return {"domain":domain,"quality":quality,"trusted":quality>=V515_SOURCE_MIN_QUALITY}
+
+def v515_knowledge_update(source, facts, story_id=None):
+    entities=V515_KNOWLEDGE.setdefault("entities",{})
+    for key in ("game","title","name","developer","publisher","studio","company"):
+        val=facts.get(key) if isinstance(facts,dict) else None
+        if isinstance(val,str) and val.strip():
+            entities.setdefault(norm(val),{"name":val.strip(),"last_seen":int(time.time())})
+    if story_id:
+        stories=V515_KNOWLEDGE.setdefault("stories",{})
+        stories.setdefault(str(story_id),{"created_at":int(time.time()),"updates":0})
+        stories[str(story_id)]["updates"]=int(stories[str(story_id)].get("updates",0))+1
+    _v515_save_json(V515_KNOWLEDGE_FILE,V515_KNOWLEDGE)
+
+def v515_cache_key(url, text=""):
+    raw=(str(url or "")+"|"+norm(text)[:6000]).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
+
+def v515_cache_get(url, text=""):
+    if not url and not text: return None
+    item=V515_CACHE.get(v515_cache_key(url,text))
+    if isinstance(item,dict) and int(time.time())-int(item.get("ts",0)) < 86400:
+        return item
+    return None
+
+def v515_cache_put(url, text, value):
+    if not url and not text: return
+    V515_CACHE[v515_cache_key(url,text)]={"ts":int(time.time()),"value":value}
+    if len(V515_CACHE)>500:
+        old=sorted(V515_CACHE.items(),key=lambda kv:int(kv[1].get("ts",0)))[:100]
+        for k,_ in old: V515_CACHE.pop(k,None)
+    _v515_save_json(V515_CACHE_FILE,V515_CACHE)
+
+def v515_relevance_image(source, image_url):
+    if not image_url: return 0
+    title=norm(source.get("title",""))
+    url=norm(image_url)
+    score=0
+    for token in title.split():
+        if len(token)>=4 and token in url: score+=12
+    if source.get("image") and image_url==source.get("image"): score+=20
+    return min(100,score+40)
+
+def v515_final_sanitize(title, body, source, facts):
+    title=v515_strip_editorial_noise(clean_sentence(title))
+    body=v515_strip_editorial_noise(body)
+    # remove accidental category/sticker prefixes; one canonical sticker is added below.
+    title=re.sub(r"^(?:🎮|🎥|📢)\s*","",title)
+    sentences=v515_unique_sentences(split_sentences("x\n"+body)[1])
+    # split_sentences can treat the first synthetic title as title; preserve the actual body with sentence splitter.
+    if not sentences:
+        sentences=[clean_sentence(x) for x in re.split(r"(?<=[.!؟])\s+",body) if clean_sentence(x)]
+        sentences=v515_unique_sentences(sentences)
+    sentences=[ensure_persian_start(s,False) for s in sentences if s]
+    sentences=[s for s in sentences if s and not any(re.search(p,s,re.I) for p in V515_CTA_PATTERNS)]
+    sentences=sentences[:V515_MAX_BODY_SENTENCES]
+    detail=v515_category_detail(title+" "+" ".join(sentences),facts)
+    # Strict numeric claim lock: do not silently invent numbers.
+    unsupported=v515_claim_lock(source,facts," ".join(sentences))
+    if unsupported:
+        for num in unsupported:
+            sentences=[re.sub(rf"(?<!\w){re.escape(num)}(?!\w)","",s) for s in sentences]
+    body=" ".join(s.strip() for s in sentences if s.strip())
+    if not title or not body:
+        return "", "", detail
+    return title,body,detail
+
+async def v515_dry_run(message, text):
+    """ادمین می‌تواند با /dryrun URL خروجی را بدون انتشار آزمایش کند."""
+    url=extract_url(text)
+    source=await fetch_article(url) if url else {"url":"","domain":"manual","title":"","description":"","body":text,"image":""}
+    facts=await extract_facts(source)
+    generated=await v59_generate(source,facts,[],[],normalize_mode(WRITING_MODE))
+    title,sents=split_sentences(generated)
+    title,body,_=v515_final_sanitize(title," ".join(sents),source,facts)
+    return format_post((title+"\n"+body) if title and body else "")
+
+def v515_search_memory(query):
+    q=norm(query)
+    hits=[]
+    for item in memory:
+        hay=norm(str(item.get("title",""))+" "+str(item.get("source",""))+" "+str(item.get("post","")))
+        if q and q in hay:
+            hits.append(item)
+    return hits[-20:]
+
+
+
+
+# ============================================================
+# V5.15.0 FEATURE POLICY
+# ============================================================
+V515_FEATURE_POLICY = {
+    "gamefa_writing_dna": True,
+    "two_stage_ai": True,
+    "fact_lock": True,
+    "strict_validator": True,
+    "story_memory": True,
+    "update_vs_duplicate": True,
+    "source_provenance": True,
+    "stale_news_detection": True,
+    "image_relevance": True,
+    "parallel_independent_steps": True,
+    "persistent_key_failover": True,
+    "cache": True,
+    "dry_run": True,
+    "archive_search": True,
+    "three_stickers_only": True,
+    "no_cta": True,
+    "no_post_status": True,
+}
