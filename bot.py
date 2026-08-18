@@ -37,7 +37,7 @@ from openai import AsyncOpenAI
 
 
 # ============================================================
-# GAMEFA BOT v5.16.0
+# GAMEFA BOT v5.16.1
 # ============================================================
 # امکانات:
 # - پشتیبانی از لینک Gamefa و سایت‌های خبری دیگر
@@ -50,7 +50,7 @@ from openai import AsyncOpenAI
 # - Railway friendly
 # ============================================================
 
-BOT_VERSION = "v5.16.0"
+BOT_VERSION = "v5.16.1"
 # v5.11.0: تیتر بدون محدودیت تعداد کلمه
 # طول تیتر فقط با دقت، روانی و ارتباط با خبر کنترل می‌شود.
 HEADLINE_WORD_LIMIT = None
@@ -173,7 +173,7 @@ OPENAI_KEY_COOLDOWN = {}
 OPENAI_DISABLED_KEYS = set()
 
 # ============================================================
-# v5.16.0 OPENAI API KEY ANALYTICS
+# v5.16.1 OPENAI API KEY ANALYTICS
 # Persistent SQLite statistics survive Railway restarts/deploys.
 # ============================================================
 API_STATS_DB = Path(os.getenv("API_STATS_DB", "gamefa_api_stats.sqlite3"))
@@ -2337,7 +2337,7 @@ async def clear_command(message: Message):
 # TEXT HANDLER
 # ============================================================
 
-@router.message(F.text)
+@router.message(F.text, ~F.text.startswith("/"))
 async def text_handler(message: Message):
     if not is_admin(message):
         return
@@ -2671,7 +2671,7 @@ def key_health_snapshot():
 
 def api_keys_detailed_text():
     rows=api_stats_rows(); now=time.time()
-    lines=["🔑 <b>آمار دقیق OpenAI API — v5.16.0</b>",""]
+    lines=["🔑 <b>آمار دقیق OpenAI API — v5.16.1</b>",""]
     if not rows:
         return "\n".join(lines+["❌ هیچ کلیدی تنظیم نشده است."])
     totals=[0]*8
@@ -2698,7 +2698,7 @@ def api_keys_detailed_text():
 
 def editorial_dashboard_text():
     return (
-        "📊 <b>داشبورد تحریریه v5.16.0</b>\n\n"
+        "📊 <b>داشبورد تحریریه v5.16.1</b>\n\n"
         f"📰 پردازش‌شده: <b>{editorial_stats.get('processed',0)}</b>\n"
         f"📢 منتشرشده: <b>{editorial_stats.get('published',0)}</b>\n"
         f"♻️ تکراری: <b>{editorial_stats.get('duplicates',0)}</b>\n"
@@ -4841,7 +4841,7 @@ async def debug_command_v511(message: Message):
     if not is_admin(message): return
     results=await v56_health_check()
     await message.answer(
-        "🛠 <b>Gamefa Bot Debug v5.16.0</b>\n\n"
+        "🛠 <b>Gamefa Bot Debug v5.16.1</b>\n\n"
         f"🤖 مدل: <code>{escape_html(MODEL)}</code>\n"
         f"🧠 AI Editor: {'🟢' if AI_EDITOR_ENABLED else '🔴'}\n"
         f"🧬 Semantic Duplicate: {'🟢' if ENABLE_SEMANTIC_DUPLICATE else '🔴'}\n"
