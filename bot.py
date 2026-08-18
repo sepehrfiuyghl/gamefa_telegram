@@ -6,6 +6,7 @@ import asyncio
 import logging
 import hashlib
 import time
+import sqlite3
 from pathlib import Path
 from urllib.parse import urlparse, urljoin
 from collections import deque
@@ -36,7 +37,7 @@ from openai import AsyncOpenAI
 
 
 # ============================================================
-# GAMEFA BOT v5.15.0
+# GAMEFA BOT v5.16.0
 # ============================================================
 # امکانات:
 # - پشتیبانی از لینک Gamefa و سایت‌های خبری دیگر
@@ -49,7 +50,7 @@ from openai import AsyncOpenAI
 # - Railway friendly
 # ============================================================
 
-BOT_VERSION = "v5.15.0"
+BOT_VERSION = "v5.16.0"
 # v5.11.0: تیتر بدون محدودیت تعداد کلمه
 # طول تیتر فقط با دقت، روانی و ارتباط با خبر کنترل می‌شود.
 HEADLINE_WORD_LIMIT = None
@@ -171,6 +172,103 @@ OPENAI_KEY_COOLDOWN = {}
 # کلیدهایی که خطای دائمی گرفته‌اند؛ تا ری‌استارت بعدی از چرخه Failover خارج می‌شوند.
 OPENAI_DISABLED_KEYS = set()
 
+# ============================================================
+# v5.16.0 OPENAI API KEY ANALYTICS
+# Persistent SQLite statistics survive Railway restarts/deploys.
+# ============================================================
+API_STATS_DB = Path(os.getenv("API_STATS_DB", "gamefa_api_stats.sqlite3"))
+API_STATS_DB.parent.mkdir(parents=True, exist_ok=True)
+API_STATS_LOCK = asyncio.Lock()
+
+def _api_db_conn():
+    conn = sqlite3.connect(str(API_STATS_DB), timeout=30)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("""CREATE TABLE IF NOT EXISTS api_keys (
+        key_index INTEGER PRIMARY KEY, key_hash TEXT, state TEXT DEFAULT 'active',
+        total_requests INTEGER DEFAULT 0, successful_requests INTEGER DEFAULT 0,
+        failed_requests INTEGER DEFAULT 0, failovers INTEGER DEFAULT 0,
+        rate_limits INTEGER DEFAULT 0, auth_errors INTEGER DEFAULT 0,
+        client_errors INTEGER DEFAULT 0, server_errors INTEGER DEFAULT 0,
+        timeouts INTEGER DEFAULT 0, other_errors INTEGER DEFAULT 0,
+        total_input_tokens INTEGER DEFAULT 0, total_output_tokens INTEGER DEFAULT 0,
+        total_tokens INTEGER DEFAULT 0, last_used_at REAL, last_success_at REAL,
+        last_error_at REAL, last_error TEXT, disabled_at REAL, cooldown_until REAL
+    )""")
+    conn.commit()
+    return conn
+
+def _key_hash(key):
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
+
+def api_stats_init():
+    conn=_api_db_conn()
+    try:
+        for i,key in enumerate(OPENAI_KEYS):
+            conn.execute("INSERT OR IGNORE INTO api_keys(key_index,key_hash) VALUES(?,?)", (i,_key_hash(key)))
+            conn.execute("UPDATE api_keys SET key_hash=? WHERE key_index=?", (_key_hash(key),i))
+        conn.commit()
+        rows=conn.execute("SELECT key_index,state,cooldown_until FROM api_keys").fetchall()
+        for key_index,state,cooldown_until in rows:
+            if key_index >= len(OPENAI_KEYS):
+                continue
+            if state == 'disabled':
+                OPENAI_DISABLED_KEYS.add(key_index)
+            elif state == 'cooldown' and cooldown_until and cooldown_until > time.time():
+                OPENAI_KEY_COOLDOWN[key_index] = cooldown_until
+            elif state == 'cooldown':
+                conn.execute("UPDATE api_keys SET state='active', cooldown_until=NULL WHERE key_index=?", (key_index,))
+        conn.commit()
+    finally:
+        conn.close()
+
+def _api_stat_update(index, field, amount=1):
+    conn=_api_db_conn()
+    try:
+        conn.execute(f"UPDATE api_keys SET {field}={field}+? WHERE key_index=?", (int(amount),index))
+        conn.commit()
+    finally:
+        conn.close()
+
+def _api_stat_event(index, response=None, error=None, failover=False):
+    conn=_api_db_conn(); now=time.time()
+    try:
+        if index >= len(OPENAI_KEYS): return
+        conn.execute("UPDATE api_keys SET total_requests=total_requests+1,last_used_at=? WHERE key_index=?",(now,index))
+        if failover:
+            conn.execute("UPDATE api_keys SET failovers=failovers+1 WHERE key_index=?",(index,))
+        if error is None:
+            usage=getattr(response,'usage',None)
+            inp=int(getattr(usage,'input_tokens',0) or 0)
+            out=int(getattr(usage,'output_tokens',0) or 0)
+            total=int(getattr(usage,'total_tokens',inp+out) or (inp+out))
+            conn.execute("UPDATE api_keys SET successful_requests=successful_requests+1,total_input_tokens=total_input_tokens+?,total_output_tokens=total_output_tokens+?,total_tokens=total_tokens+?,last_success_at=?,state=CASE WHEN state='cooldown' THEN 'active' ELSE state END WHERE key_index=?",(inp,out,total,now,index))
+        else:
+            text=str(error)[:500]; low=text.lower(); status=getattr(error,'status_code',None)
+            field='other_errors'
+            if status==401 or 'account_deactivated' in low or 'invalid_api_key' in low or 'incorrect api key' in low: field='auth_errors'
+            elif status==429 or 'rate limit' in low or 'quota' in low: field='rate_limits'
+            elif status in (408,) or 'timeout' in low or 'timed out' in low: field='timeouts'
+            elif status in (400,403,404,409,422): field='client_errors'
+            elif status in (500,502,503,504): field='server_errors'
+            conn.execute(f"UPDATE api_keys SET failed_requests=failed_requests+1,{field}={field}+1,last_error_at=?,last_error=? WHERE key_index=?",(now,text,index))
+        conn.commit()
+    finally: conn.close()
+
+def _api_stat_state(index, state, cooldown_until=None, error=None):
+    conn=_api_db_conn(); now=time.time()
+    try:
+        conn.execute("UPDATE api_keys SET state=?, cooldown_until=?, last_error=COALESCE(?,last_error), disabled_at=CASE WHEN ?='disabled' THEN ? ELSE disabled_at END WHERE key_index=?",(state,cooldown_until,str(error)[:500] if error else None,state,now if state=='disabled' else None,index))
+        conn.commit()
+    finally: conn.close()
+
+def api_stats_rows():
+    conn=_api_db_conn()
+    try:
+        return conn.execute("SELECT * FROM api_keys ORDER BY key_index").fetchall()
+    finally: conn.close()
+
+api_stats_init()
+
 memory = []
 prepared = {}
 processing_users = set()
@@ -267,64 +365,42 @@ def openai_is_retryable(error):
 
 async def openai_failover(callback):
     global OPENAI_KEY_INDEX
-
     if not OPENAI_KEYS:
         raise RuntimeError("هیچ کلید OpenAI تنظیم نشده است.")
-
-    last_error = None
-    total_keys = len(OPENAI_KEYS)
-
+    last_error=None; total_keys=len(OPENAI_KEYS)
+    attempted=[]
     for offset in range(total_keys):
-        index = (OPENAI_KEY_INDEX + offset) % total_keys
-
-        # کلیدهای خراب/غیرفعال اصلاً دوباره امتحان نمی‌شوند.
-        if index in OPENAI_DISABLED_KEYS:
+        index=(OPENAI_KEY_INDEX+offset)%total_keys
+        if index in OPENAI_DISABLED_KEYS or OPENAI_KEY_COOLDOWN.get(index,0)>time.time():
             continue
-
-        if OPENAI_KEY_COOLDOWN.get(index, 0) > time.time():
-            continue
-
+        attempted.append(index)
         try:
-            client = get_openai_client(index)
-            result = await callback(client)
-
-            OPENAI_KEY_INDEX = (index + 1) % total_keys
-            OPENAI_KEY_COOLDOWN.pop(index, None)
+            client=get_openai_client(index)
+            result=await callback(client)
+            _api_stat_event(index,response=result)
+            OPENAI_KEY_INDEX=(index+1)%total_keys
+            OPENAI_KEY_COOLDOWN.pop(index,None)
+            _api_stat_state(index,'active',None)
             return result
-
         except Exception as error:
-            last_error = error
-
-            # خطاهای دائمی مثل account_deactivated / invalid_api_key:
-            # این کلید را از چرخه خارج کن و مستقیم سراغ کلید بعدی برو.
+            last_error=error
+            _api_stat_event(index,error=error,failover=True)
             if openai_is_permanently_invalid(error):
                 OPENAI_DISABLED_KEYS.add(index)
-                OPENAI_KEY_COOLDOWN.pop(index, None)
-                log.error(
-                    "OpenAI key #%s permanently disabled; removed from failover cycle. Error: %s",
-                    index + 1,
-                    error,
-                )
+                OPENAI_KEY_COOLDOWN.pop(index,None)
+                _api_stat_state(index,'disabled',None,error)
+                log.error("OpenAI key #%s permanently disabled: %s",index+1,error)
                 continue
-
             if not openai_is_retryable(error):
                 raise
-
-            wait = openai_retry_seconds(error)
-            OPENAI_KEY_COOLDOWN[index] = time.time() + min(
-                max(wait, 30), 1800
-            )
-
-            log.warning(
-                "OpenAI key #%s unavailable; trying another key.",
-                index + 1,
-            )
-
+            wait=min(max(openai_retry_seconds(error),30),1800)
+            until=time.time()+wait
+            OPENAI_KEY_COOLDOWN[index]=until
+            _api_stat_state(index,'cooldown',until,error)
+            log.warning("OpenAI key #%s cooldown %.0fs; trying next key",index+1,wait)
+            continue
     if last_error:
-        disabled_count = len(OPENAI_DISABLED_KEYS)
-        raise RuntimeError(
-            f"تمام کلیدهای OpenAI در دسترس نیستند. {disabled_count} کلید به‌دلیل خطای دائمی از چرخه خارج شده‌اند."
-        ) from last_error
+        raise RuntimeError(f"تمام کلیدهای OpenAI در دسترس نیستند. کلیدهای غیرفعال: {len(OPENAI_DISABLED_KEYS)}") from last_error
     raise RuntimeError("تمام کلیدهای OpenAI در حال حاضر در Cooldown یا غیرفعال هستند.")
 
 
@@ -2577,34 +2653,58 @@ def build_custom_post(title, body, source=None, facts=None):
     )
 
 
-def key_health_snapshot():
-    now = time.time()
-    rows = []
-    for index, key in enumerate(OPENAI_KEYS):
-        cooldown = max(0, int(OPENAI_KEY_COOLDOWN.get(index, 0) - now))
-        if cooldown:
-            status = f"🟡 cooldown {cooldown}s"
-        else:
-            status = "🟢 آماده"
-        rows.append(f"{index + 1}️⃣ {status}")
-    return rows or ["❌ کلیدی تنظیم نشده است"]
+def _mask_key(key):
+    if not key: return "—"
+    return f"{key[:3]}…{key[-4:]}"
 
+def key_health_snapshot():
+    now=time.time(); rows=[]
+    db={r[0]:r for r in api_stats_rows()}
+    for i,key in enumerate(OPENAI_KEYS):
+        r=db.get(i); cooldown=max(0,int((r[20] or 0)-now)) if r else 0
+        disabled=i in OPENAI_DISABLED_KEYS or (r and r[2]=='disabled')
+        if disabled: state='🔴 غیرفعال'
+        elif cooldown: state=f'🟡 Cooldown {cooldown}s'
+        else: state='🟢 فعال'
+        rows.append(f"{i+1}️⃣ {_mask_key(key)} — {state}")
+    return rows or ['❌ کلیدی تنظیم نشده است']
+
+def api_keys_detailed_text():
+    rows=api_stats_rows(); now=time.time()
+    lines=["🔑 <b>آمار دقیق OpenAI API — v5.16.0</b>",""]
+    if not rows:
+        return "\n".join(lines+["❌ هیچ کلیدی تنظیم نشده است."])
+    totals=[0]*8
+    active=cd=disabled=0
+    for r in rows:
+        idx,kh,state,total,succ,fail,fo,rl,auth,cli,serv,to,other,inp,out,tok,last,lasts,lasterr,dis_at,cool=r
+        cooldown=max(0,int((cool or 0)-now))
+        if idx in OPENAI_DISABLED_KEYS or state=='disabled': disabled+=1; icon='🔴'; label='غیرفعال'
+        elif cooldown: cd+=1; icon='🟡'; label=f'Cooldown {cooldown}s'
+        else: active+=1; icon='🟢'; label='فعال'
+        rate=(succ/total*100) if total else 0
+        lines += [f"<b>🔑 کلید #{idx+1}</b> — {_mask_key(OPENAI_KEYS[idx])} — {icon} {label}",
+                  f"درخواست: {total} | موفق: {succ} | ناموفق: {fail} | موفقیت: {rate:.2f}%",
+                  f"Failover: {fo} | 429: {rl} | 401/Auth: {auth} | 4xx: {cli} | 5xx: {serv} | Timeout: {to}",
+                  f"توکن ورودی: {inp:,} | خروجی: {out:,} | مجموع: {tok:,}",
+                  f"آخرین استفاده: {datetime.fromtimestamp(last).strftime('%Y-%m-%d %H:%M:%S') if last else '—'}",
+                  f"آخرین موفقیت: {datetime.fromtimestamp(lasts).strftime('%Y-%m-%d %H:%M:%S') if lasts else '—'}",
+                  f"آخرین خطا: {html.escape(str(lasterr or '—'))}",""]
+    all_rows=rows
+    total=sum(r[3] for r in all_rows); succ=sum(r[4] for r in all_rows); fail=sum(r[5] for r in all_rows); fo=sum(r[6] for r in all_rows); rl=sum(r[7] for r in all_rows); auth=sum(r[8] for r in all_rows); serv=sum(r[10] for r in all_rows); to=sum(r[11] for r in all_rows); tok=sum(r[15] for r in all_rows)
+    rate=succ/total*100 if total else 0
+    summary=["━━━━━━━━━━━━━━━━━━", "📊 <b>مجموع کلیدها</b>", f"کلیدها: {len(rows)} | 🟢 {active} | 🟡 {cd} | 🔴 {disabled}", f"درخواست: {total} | موفق: {succ} | ناموفق: {fail} | موفقیت: {rate:.2f}%", f"Failover: {fo} | 429: {rl} | 401/Auth: {auth} | 5xx: {serv} | Timeout: {to}", f"کل توکن ثبت‌شده: {tok:,}"]
+    return "\n".join(lines+summary)
 
 def editorial_dashboard_text():
     return (
-        "📊 <b>داشبورد تحریریه v5.15.0</b>\n\n"
+        "📊 <b>داشبورد تحریریه v5.16.0</b>\n\n"
         f"📰 پردازش‌شده: <b>{editorial_stats.get('processed',0)}</b>\n"
         f"📢 منتشرشده: <b>{editorial_stats.get('published',0)}</b>\n"
         f"♻️ تکراری: <b>{editorial_stats.get('duplicates',0)}</b>\n"
-        f"❌ ناموفق: <b>{editorial_stats.get('failed',0)}</b>\n"
-        f"🖼 تصویر موفق: <b>{editorial_stats.get('images_ok',0)}</b>\n"
-        f"🚨 Breaking: <b>{editorial_stats.get('breaking',0)}</b>\n"
-        f"🔎 Web Search: <b>{editorial_stats.get('web_search',0)}</b>\n"
-        f"🌐 چندمنبعی: <b>{editorial_stats.get('multi_source',0)}</b>\n"
-        f"✏️ اصلاحات: <b>{editorial_stats.get('edits',0)}</b>\n"
-        f"🔄 بازنویسی: <b>{editorial_stats.get('rewrites',0)}</b>\n"
-        f"📥 بیشترین صف: <b>{editorial_stats.get('queue_max',0)}</b>\n\n"
-        "🔑 <b>وضعیت کلیدها</b>\n" + "\n".join(key_health_snapshot())
+        f"❌ ناموفق: <b>{editorial_stats.get('failed',0)}</b>\n\n"
+        "🔑 <b>وضعیت API Key</b>\n" + "\n".join(key_health_snapshot()) + "\n\n"
+        "برای آمار کامل هر کلید: /keys"
     )
 
 
@@ -2944,7 +3044,7 @@ async def dashboard_command(message: Message):
 @router.message(Command("keys"))
 async def keys_command(message: Message):
     if not is_admin(message): return
-    await message.answer("🔑 <b>وضعیت کلیدهای OpenAI</b>\n\n" + "\n".join(key_health_snapshot()), parse_mode=ParseMode.HTML)
+    await message.answer(api_keys_detailed_text(), parse_mode=ParseMode.HTML)
 
 
 @router.message(Command("queue"))
@@ -4741,7 +4841,7 @@ async def debug_command_v511(message: Message):
     if not is_admin(message): return
     results=await v56_health_check()
     await message.answer(
-        "🛠 <b>Gamefa Bot Debug v5.15.0</b>\n\n"
+        "🛠 <b>Gamefa Bot Debug v5.16.0</b>\n\n"
         f"🤖 مدل: <code>{escape_html(MODEL)}</code>\n"
         f"🧠 AI Editor: {'🟢' if AI_EDITOR_ENABLED else '🔴'}\n"
         f"🧬 Semantic Duplicate: {'🟢' if ENABLE_SEMANTIC_DUPLICATE else '🔴'}\n"
@@ -4837,6 +4937,7 @@ async def main():
             "هیچ OPENAI_API_KEY تنظیم نشده است."
         )
 
+    api_stats_init()
     load_memory()
     load_editorial_state()
 
