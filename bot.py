@@ -36,7 +36,7 @@ from openai import AsyncOpenAI
 
 
 # ============================================================
-# GAMEFA BOT v5.17.0
+# GAMEFA BOT v5.18.0
 # ============================================================
 # امکانات:
 # - پشتیبانی از لینک Gamefa و سایت‌های خبری دیگر
@@ -49,8 +49,8 @@ from openai import AsyncOpenAI
 # - Railway friendly
 # ============================================================
 
-BOT_VERSION = "v5.17.0"
-# v5.17.0: تیتر بدون محدودیت تعداد کلمه
+BOT_VERSION = "v5.18.0"
+# v5.18.0: تیتر بدون محدودیت تعداد کلمه
 # طول تیتر فقط با دقت، روانی و ارتباط با خبر کنترل می‌شود.
 HEADLINE_WORD_LIMIT = None
 MAX_NEWS_SENTENCES = 10
@@ -164,7 +164,7 @@ V517_OPENAI_KEY_NAMES = (
     "OPENAI_API_KEY_5",
 )
 
-# v5.17.0: only the five numbered slots are used for the primary pool.
+# v5.18.0: only the five numbered slots are used for the primary pool.
 
 for i, env_name in enumerate(V517_OPENAI_KEY_NAMES, 1):
     key = os.getenv(env_name, "").strip()
@@ -281,7 +281,7 @@ def openai_is_retryable(error):
 
 
 async def openai_failover(callback):
-    """v5.17.0 balanced failover: rotate across all available numbered keys."""
+    """v5.18.0 balanced failover: rotate across all available numbered keys."""
     global OPENAI_KEY_INDEX
     if not OPENAI_KEYS:
         raise RuntimeError("هیچ کلید OpenAI تنظیم نشده است.")
@@ -578,6 +578,43 @@ def detect_category(text, facts=None):
     game_score = sum(1 for x in game_strong if x in low)
     cinema_score = sum(1 for x in cinema_strong if x in low)
 
+    # نام فرنچایزها/بازی‌های شناخته‌شده برای تیترهایی که در آن‌ها
+    # کلمه «بازی» وجود ندارد؛ این نام‌ها باید به‌عنوان نشانه قوی
+    # محتوای گیمینگ در نظر گرفته شوند.
+    game_franchises = [
+        "call of duty", "modern warfare", "black ops", "warzone",
+        "grand theft auto", "gta", "red dead redemption", "red dead",
+        "battlefield", "assassin's creed", "assassins creed",
+        "resident evil", "silent hill", "metal gear", "death stranding",
+        "god of war", "the last of us", "ghost of tsushima",
+        "spider-man", "spider man", "alan wake", "cyberpunk 2077",
+        "the witcher", "elden ring", "dark souls", "bloodborne",
+        "sekiro", "monster hunter", "final fantasy", "dragon quest",
+        "persona", "pokemon", "zelda", "mario", "halo", "gears of war",
+        "forza", "fable", "starfield", "fallout", "elder scrolls",
+        "doom", "minecraft", "fortnite", "valorant", "counter-strike",
+        "cs2", "overwatch", "apex legends", "helldivers", "destiny",
+        "diablo", "baldur's gate", "civilization", "far cry",
+        "watch dogs", "prince of persia", "tekken", "street fighter",
+        "mortal kombat", "ea sports fc", "fifa", "nba 2k", "wwe 2k",
+        "need for speed", "gran turismo", "star wars jedi"
+    ]
+    franchise_hits = sum(1 for x in game_franchises if x in low)
+    game_score += franchise_hits * 12
+
+    # نام یک فرنچایز به همراه نشانه‌های بازی/پیش‌خرید/کمپین/بتا
+    # اطمینان را بیشتر می‌کند.
+    game_context_terms = [
+        "پیش‌خرید", "پیش خرید", "کمپین", "چندنفره", "چند نفره",
+        "بخش چندنفره", "بخش چند نفره", "بتا", "گیم‌پلی", "گیم پلی",
+        "بازیکن", "بازیکنان", "dlc", "gameplay", "multiplayer",
+        "single-player", "single player", "campaign", "pre-order",
+        "preorder", "beta", "digital edition", "vault edition"
+    ]
+    game_context_hits = sum(1 for x in game_context_terms if x in low)
+    if franchise_hits and game_context_hits:
+        game_score += 8
+
     # Context صریح وزن بیشتری دارد.
     game_score += 5 * sum(1 for x in game_context if x in low)
     cinema_score += 5 * sum(1 for x in cinema_context if x in low)
@@ -598,7 +635,16 @@ def detect_category(text, facts=None):
     companies = " ".join(map(str, facts.get("companies", []) or [])).lower()
     blob += " " + people + " " + companies
 
-    if has_any(["playstation", "xbox", "nintendo", "steam", "gameplay"]):
+    # نام پلتفرم به‌تنهایی نشانه کافی برای خبر بازی نیست؛
+    # فقط وقتی کنار نشانه گیمینگ/فرنچایز آمده باشد امتیاز اضافه می‌کند.
+    platform_terms = ["playstation", "xbox", "nintendo", "steam", "gameplay"]
+    platform_present = has_any(platform_terms)
+    game_signal_present = (
+        franchise_hits > 0
+        or game_context_hits > 0
+        or has_any(["بازی", "گیم", "game", "gaming", "gameplay"])
+    )
+    if platform_present and game_signal_present:
         game_score += 4
     if any(x in blob for x in ["actor", "actress", "director", "film", "movie", "series", "cinema"]):
         cinema_score += 4
@@ -1362,7 +1408,7 @@ def title_word_count(title):
 
 
 def valid_title(title):
-    # از v5.17.0 به بعد هیچ سقف کلمه‌ای برای تیتر وجود ندارد.
+    # از v5.18.0 به بعد هیچ سقف کلمه‌ای برای تیتر وجود ندارد.
     # فقط شروع فارسی و خالی نبودن تیتر بررسی می‌شود.
     return bool(title) and starts_with_persian(title)
 
@@ -2127,7 +2173,7 @@ async def clear_archive(message: Message):
 
 @router.message(F.text == "📊 آمار")
 async def stats(message: Message):
-    # Health-aware implementation is defined later in v5.17.0 and resolved at runtime.
+    # Health-aware implementation is defined later in v5.18.0 and resolved at runtime.
     return await stats_v56(message)
 
 
@@ -2594,7 +2640,7 @@ def key_health_snapshot():
 
 def editorial_dashboard_text():
     return (
-        "📊 <b>داشبورد تحریریه v5.17.0</b>\n\n"
+        "📊 <b>داشبورد تحریریه v5.18.0</b>\n\n"
         f"📰 پردازش‌شده: <b>{editorial_stats.get('processed',0)}</b>\n"
         f"📢 منتشرشده: <b>{editorial_stats.get('published',0)}</b>\n"
         f"♻️ تکراری: <b>{editorial_stats.get('duplicates',0)}</b>\n"
@@ -3179,7 +3225,7 @@ def v56_finalize_post(post, source, facts):
     """پاک‌سازی نهایی: استیکر تیتر فقط یکی از سه دسته مجاز باشد و هشتگ حذف شود."""
     title, body = parse_editable_post(post)
     title = re.sub(r"^[🎮🎥📢🎬📱📰🟣🔵🟢🟡🟠⚪⚫🚨\s]+", "", title).strip()
-    # v5.17.0: تیتر دیگر به ۸ کلمه محدود نیست.
+    # v5.18.0: تیتر دیگر به ۸ کلمه محدود نیست.
     category = detect_category(title + " " + body, facts)
     title = f"{category} {title}"
     body = re.sub(r"(?<!\w)#[\w\u0600-\u06FF-]+", "", body)
@@ -4063,7 +4109,7 @@ async def v59_process_news(message, text):
         processing_users.discard(user_id)
 
 
-# v5.17.0 موتور اصلی
+# v5.18.0 موتور اصلی
 process_news = v59_process_news
 advanced_process_news = v59_process_news
 
@@ -4653,7 +4699,7 @@ async def v511_process_news(message, text):
 
         news_score=v511_news_score(source,facts,related,title,body,image_score)
         if breaking and float(news_score.get("score", 0) or 0) >= 70: stat_inc("breaking_ai")
-        # v5.17.0: no engagement text is ever appended to the published news.
+        # v5.18.0: no engagement text is ever appended to the published news.
         engagement=""
 
         if status: await status.edit_text("🧾 مرحله ۷/۸ — ساخت پست نهایی و حافظه تحریریه...")
@@ -4694,7 +4740,7 @@ async def v511_process_news(message, text):
         else:
             await message.answer(post,parse_mode=ParseMode.HTML,reply_markup=advanced_publish_keyboard())
 
-        # v5.17.0: the news message is the only user-visible result.
+        # v5.18.0: the news message is the only user-visible result.
         # No AI Editor/status/score/source panel is sent after it.
 
     except Exception as error:
@@ -4714,7 +4760,7 @@ async def debug_command_v511(message: Message):
     if not is_admin(message): return
     results=await v56_health_check()
     await message.answer(
-        "🛠 <b>Gamefa Bot Debug v5.17.0</b>\n\n"
+        "🛠 <b>Gamefa Bot Debug v5.18.0</b>\n\n"
         f"🤖 مدل: <code>{escape_html(MODEL)}</code>\n"
         f"🧠 AI Editor: {'🟢' if AI_EDITOR_ENABLED else '🔴'}\n"
         f"🧬 Semantic Duplicate: {'🟢' if ENABLE_SEMANTIC_DUPLICATE else '🔴'}\n"
@@ -4754,9 +4800,9 @@ process_news = v511_process_news
 advanced_process_news = v511_process_news
 
 # ============================================================
-# GAMEFA BOT v5.17.0 — STABILITY CONTRACT
+# GAMEFA BOT v5.18.0 — STABILITY CONTRACT
 # ============================================================
-V517_VERSION="v5.17.0"
+V517_VERSION="v5.18.0"
 V517_MAX_KEYS=5
 V517_UI_DASHBOARD_ENABLED=False
 V517_UI_STATS_ENABLED=False
@@ -4816,8 +4862,8 @@ def v517_cleanup_cooldowns():
 
 def v517_startup_check():
     v517_validate_key_pool(); v517_cleanup_cooldowns()
-    if len(OPENAI_KEYS)<5: log.warning("v5.17.0: %s/5 numbered OpenAI keys configured.",len(OPENAI_KEYS))
-    else: log.info("v5.17.0: all five numbered OpenAI keys configured.")
+    if len(OPENAI_KEYS)<5: log.warning("v5.18.0: %s/5 numbered OpenAI keys configured.",len(OPENAI_KEYS))
+    else: log.info("v5.18.0: all five numbered OpenAI keys configured.")
     return True
 
 def v517_pool_snapshot():
@@ -4827,235 +4873,235 @@ def v517_dashboard_is_removed(): return V517_UI_DASHBOARD_ENABLED is False
 
 def v517_stats_is_removed(): return V517_UI_STATS_ENABLED is False
 
-# v5.17.0 stability invariant 001: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 002: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 003: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 004: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 005: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 006: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 007: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 008: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 009: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 010: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 011: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 012: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 013: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 014: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 015: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 016: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 017: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 018: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 019: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 020: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 021: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 022: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 023: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 024: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 025: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 026: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 027: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 028: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 029: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 030: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 031: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 032: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 033: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 034: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 035: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 036: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 037: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 038: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 039: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 040: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 041: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 042: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 043: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 044: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 045: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 046: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 047: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 048: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 049: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 050: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 051: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 052: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 053: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 054: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 055: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 056: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 057: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 058: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 059: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 060: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 061: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 062: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 063: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 064: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 065: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 066: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 067: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 068: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 069: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 070: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 071: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 072: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 073: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 074: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 075: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 076: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 077: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 078: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 079: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 080: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 081: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 082: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 083: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 084: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 085: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 086: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 087: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 088: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 089: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 090: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 091: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 092: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 093: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 094: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 095: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 096: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 097: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 098: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 099: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 100: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 101: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 102: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 103: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 104: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 105: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 106: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 107: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 108: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 109: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 110: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 111: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 112: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 113: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 114: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 115: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 116: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 117: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 118: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 119: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 120: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 121: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 122: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 123: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 124: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 125: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 126: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 127: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 128: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 129: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 130: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 131: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 132: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 133: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 134: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 135: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 136: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 137: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 138: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 139: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 140: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 141: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 142: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 143: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 144: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 145: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 146: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 147: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 148: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 149: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 150: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 151: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 152: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 153: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 154: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 155: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 156: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 157: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 158: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 159: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 160: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 161: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 162: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 163: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 164: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 165: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 166: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 167: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 168: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 169: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 170: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 171: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 172: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 173: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 174: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 175: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 176: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 177: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 178: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 179: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 180: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 181: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 182: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 183: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 184: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 185: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 186: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 187: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 188: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 189: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 190: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 191: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 192: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 193: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 194: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 195: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 196: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 197: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 198: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 199: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 200: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 201: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 202: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 203: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 204: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 205: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 206: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 207: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 208: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 209: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 210: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 211: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 212: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 213: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 214: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 215: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 216: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 217: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 218: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 219: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 220: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 221: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 222: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 223: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 224: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 225: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 226: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 227: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 228: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.17.0 stability invariant 229: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 001: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 002: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 003: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 004: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 005: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 006: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 007: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 008: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 009: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 010: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 011: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 012: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 013: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 014: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 015: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 016: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 017: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 018: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 019: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 020: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 021: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 022: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 023: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 024: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 025: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 026: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 027: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 028: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 029: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 030: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 031: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 032: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 033: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 034: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 035: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 036: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 037: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 038: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 039: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 040: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 041: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 042: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 043: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 044: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 045: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 046: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 047: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 048: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 049: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 050: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 051: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 052: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 053: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 054: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 055: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 056: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 057: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 058: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 059: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 060: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 061: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 062: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 063: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 064: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 065: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 066: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 067: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 068: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 069: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 070: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 071: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 072: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 073: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 074: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 075: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 076: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 077: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 078: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 079: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 080: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 081: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 082: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 083: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 084: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 085: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 086: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 087: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 088: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 089: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 090: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 091: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 092: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 093: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 094: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 095: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 096: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 097: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 098: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 099: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 100: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 101: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 102: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 103: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 104: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 105: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 106: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 107: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 108: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 109: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 110: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 111: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 112: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 113: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 114: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 115: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 116: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 117: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 118: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 119: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 120: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 121: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 122: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 123: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 124: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 125: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 126: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 127: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 128: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 129: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 130: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 131: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 132: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 133: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 134: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 135: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 136: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 137: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 138: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 139: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 140: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 141: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 142: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 143: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 144: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 145: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 146: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 147: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 148: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 149: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 150: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 151: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 152: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 153: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 154: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 155: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 156: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 157: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 158: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 159: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 160: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 161: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 162: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 163: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 164: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 165: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 166: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 167: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 168: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 169: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 170: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 171: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 172: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 173: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 174: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 175: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 176: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 177: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 178: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 179: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 180: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 181: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 182: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 183: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 184: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 185: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 186: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 187: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 188: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 189: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 190: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 191: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 192: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 193: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 194: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 195: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 196: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 197: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 198: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 199: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 200: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 201: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 202: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 203: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 204: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 205: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 206: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 207: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 208: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 209: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 210: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 211: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 212: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 213: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 214: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 215: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 216: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 217: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 218: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 219: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 220: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 221: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 222: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 223: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 224: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 225: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 226: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 227: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 228: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 229: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
 
 # ============================================================
 # MAIN
