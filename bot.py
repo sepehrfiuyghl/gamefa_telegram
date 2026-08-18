@@ -36,7 +36,7 @@ from openai import AsyncOpenAI
 
 
 # ============================================================
-# GAMEFA BOT v5.13.0
+# GAMEFA BOT v5.12.0
 # ============================================================
 # امکانات:
 # - پشتیبانی از لینک Gamefa و سایت‌های خبری دیگر
@@ -49,7 +49,7 @@ from openai import AsyncOpenAI
 # - Railway friendly
 # ============================================================
 
-BOT_VERSION = "v5.13.0"
+BOT_VERSION = "v5.12.0"
 # v5.11.0: تیتر بدون محدودیت تعداد کلمه
 # طول تیتر فقط با دقت، روانی و ارتباط با خبر کنترل می‌شود.
 HEADLINE_WORD_LIMIT = None
@@ -168,39 +168,8 @@ if legacy_key and legacy_key not in OPENAI_KEYS:
 OPENAI_CLIENTS = {}
 OPENAI_KEY_INDEX = 0
 OPENAI_KEY_COOLDOWN = {}
-
-# وضعیت کلیدهای دائماً خراب با هش ذخیره می‌شود تا خود API Key هرگز روی دیسک نوشته نشود.
+# کلیدهایی که خطای دائمی گرفته‌اند؛ تا ری‌استارت بعدی از چرخه Failover خارج می‌شوند.
 OPENAI_DISABLED_KEYS = set()
-OPENAI_DISABLED_KEY_HASHES = set()
-OPENAI_KEY_STATE_FILE = Path(os.getenv("OPENAI_KEY_STATE_FILE", "openai_key_state.json"))
-
-def _openai_key_hash(key):
-    return hashlib.sha256((key or "").encode("utf-8")).hexdigest()
-
-def load_openai_key_state():
-    global OPENAI_DISABLED_KEY_HASHES, OPENAI_DISABLED_KEYS
-    try:
-        if not OPENAI_KEY_STATE_FILE.exists():
-            return
-        raw = json.loads(OPENAI_KEY_STATE_FILE.read_text(encoding="utf-8"))
-        hashes = raw.get("disabled_key_hashes", []) if isinstance(raw, dict) else []
-        if isinstance(hashes, list):
-            OPENAI_DISABLED_KEY_HASHES = {str(x) for x in hashes if x}
-        OPENAI_DISABLED_KEYS = {
-            i for i, key in enumerate(OPENAI_KEYS)
-            if _openai_key_hash(key) in OPENAI_DISABLED_KEY_HASHES
-        }
-    except Exception as error:
-        log.warning("OpenAI key state load error: %s", error)
-
-def save_openai_key_state():
-    try:
-        OPENAI_KEY_STATE_FILE.write_text(
-            json.dumps({"disabled_key_hashes": sorted(OPENAI_DISABLED_KEY_HASHES)}, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-    except Exception as error:
-        log.warning("OpenAI key state save error: %s", error)
 
 memory = []
 prepared = {}
@@ -211,7 +180,6 @@ logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(message)s",
 )
 log = logging.getLogger("gamefa_bot")
-load_openai_key_state()
 
 
 # ============================================================
@@ -298,16 +266,10 @@ def openai_is_retryable(error):
 
 
 async def openai_failover(callback):
-    global OPENAI_KEY_INDEX, OPENAI_DISABLED_KEYS
+    global OPENAI_KEY_INDEX
 
     if not OPENAI_KEYS:
         raise RuntimeError("هیچ کلید OpenAI تنظیم نشده است.")
-
-    # وضعیت دائمی را بر اساس هش کلیدها دوباره به index نگاشت می‌کنیم.
-    OPENAI_DISABLED_KEYS = {
-        i for i, key in enumerate(OPENAI_KEYS)
-        if _openai_key_hash(key) in OPENAI_DISABLED_KEY_HASHES
-    }
 
     last_error = None
     total_keys = len(OPENAI_KEYS)
@@ -315,6 +277,7 @@ async def openai_failover(callback):
     for offset in range(total_keys):
         index = (OPENAI_KEY_INDEX + offset) % total_keys
 
+        # کلیدهای خراب/غیرفعال اصلاً دوباره امتحان نمی‌شوند.
         if index in OPENAI_DISABLED_KEYS:
             continue
 
@@ -324,6 +287,7 @@ async def openai_failover(callback):
         try:
             client = get_openai_client(index)
             result = await callback(client)
+
             OPENAI_KEY_INDEX = (index + 1) % total_keys
             OPENAI_KEY_COOLDOWN.pop(index, None)
             return result
@@ -331,14 +295,15 @@ async def openai_failover(callback):
         except Exception as error:
             last_error = error
 
+            # خطاهای دائمی مثل account_deactivated / invalid_api_key:
+            # این کلید را از چرخه خارج کن و مستقیم سراغ کلید بعدی برو.
             if openai_is_permanently_invalid(error):
                 OPENAI_DISABLED_KEYS.add(index)
-                OPENAI_DISABLED_KEY_HASHES.add(_openai_key_hash(OPENAI_KEYS[index]))
                 OPENAI_KEY_COOLDOWN.pop(index, None)
-                save_openai_key_state()
                 log.error(
-                    "OpenAI key #%s permanently disabled and removed from failover: %s",
-                    index + 1, error,
+                    "OpenAI key #%s permanently disabled; removed from failover cycle. Error: %s",
+                    index + 1,
+                    error,
                 )
                 continue
 
@@ -346,12 +311,21 @@ async def openai_failover(callback):
                 raise
 
             wait = openai_retry_seconds(error)
-            OPENAI_KEY_COOLDOWN[index] = time.time() + min(max(float(wait), 30.0), 1800.0)
-            log.warning("OpenAI key #%s temporarily unavailable; trying next key.", index + 1)
+            OPENAI_KEY_COOLDOWN[index] = time.time() + min(
+                max(wait, 30), 1800
+            )
+
+            log.warning(
+                "OpenAI key #%s unavailable; trying another key.",
+                index + 1,
+            )
 
     if last_error:
-        raise RuntimeError("هیچ کلید فعال OpenAI در این تلاش پاسخ موفق نداد.") from last_error
-    raise RuntimeError("تمام کلیدهای OpenAI غیرفعال یا در Cooldown هستند.")
+        disabled_count = len(OPENAI_DISABLED_KEYS)
+        raise RuntimeError(
+            f"تمام کلیدهای OpenAI در دسترس نیستند. {disabled_count} کلید به‌دلیل خطای دائمی از چرخه خارج شده‌اند."
+        ) from last_error
+    raise RuntimeError("تمام کلیدهای OpenAI در حال حاضر در Cooldown یا غیرفعال هستند.")
 
 
 # ============================================================
@@ -543,52 +517,100 @@ def strip_site_branding_from_title(text):
 # ============================================================
 
 def detect_category(text, facts=None):
-    """دسته‌بندی وزنی و محافظه‌کارانه؛ سینما بر بازی اولویت دارد وقتی نشانه‌های سینمایی قوی باشند."""
-    raw = text or ""
+    """
+    Sticker/category engine:
+    فقط سه برچسب مجاز دارد:
+      🎮 = بازی
+      🎥 = سینما و فیلم/سریال
+      📢 = متفرقه
+
+    انتخاب بر اساس موضوع واقعی خبر است، نه صرفاً نام شرکت یا یک کلمه منفرد.
+    """
+    raw = str(text or "")
     low = raw.lower()
-    facts = facts or {}
-    movie_strong = [
-        "فیلم", "سریال", "سینما", "لایو اکشن", "live action", "movie", "film",
-        "series", "season", "episode", "trailer", "casting", "cast", "بازیگر",
-        "کارگردان", "فیلمنامه", "اکران", "box office", "netflix", "hbo", "disney",
-        "pixar", "marvel", "dc", "a24", "warner bros", "universal pictures",
-        "paramount", "sony pictures", "prime video", "apple tv", "tangled",
-        "rapunzel", "فلین رایدر", "راپانزل", "اسکار", "oscar"
+    facts = facts if isinstance(facts, dict) else {}
+
+    def has_any(items):
+        return any(x in low for x in items)
+
+    # نشانه‌های صریح سینما/فیلم/سریال
+    cinema_strong = [
+        "فیلم", "سریال", "سینما", "فصل جدید", "قسمت", "بازیگر",
+        "کارگردان", "فیلمنامه", "فیلمبرداری", "اکران", "گیشه",
+        "لایو اکشن", "live-action", "live action", "movie", "film",
+        "series", "season", "episode", "casting", "cast", "actress",
+        "actor", "director", "screenplay", "cinema", "box office",
+        "trailer", "teaser", "poster", "netflix", "hbo", "max",
+        "disney+", "disney plus", "pixar", "marvel studios",
+        "dc studios", "warner bros", "universal pictures",
+        "paramount pictures", "sony pictures", "prime video",
+        "apple tv+", "apple tv plus"
     ]
+
+    # نشانه‌های صریح بازی
     game_strong = [
-        "بازی ویدیویی", "بازی ویدئویی", "گیم", "game", "gaming", "playstation", "xbox",
-        "nintendo", "steam", "ps5", "ps4", "switch", "pc", "dlc", "patch", "update",
-        "gameplay", "developer", "publisher", "studio", "کنسول", "سازنده بازی",
-        "ناشر بازی", "نسخه pc", "نسخه ps5", "نسخه xbox", "استیم"
+        "بازی ویدیویی", "بازی ویدئویی", "بازی جدید", "بازی", "گیم",
+        "گیمینگ", "گیم‌پلی", "گیم پلی", "بازی‌ساز", "بازی‌سازی",
+        "سازنده بازی", "ناشر بازی", "استودیو بازی", "کنسول",
+        "دسته بازی", "نسخه pc", "نسخه ps5", "نسخه ps4",
+        "نسخه xbox", "نسخه switch", "dlc", "patch", "gameplay",
+        "video game", "videogame", "gaming", "game", "playstation",
+        "xbox", "nintendo", "steam", "epic games", "ps5", "ps4",
+        "ps3", "xbox series", "xbox one", "switch", "steam deck"
     ]
-    misc = [
-        "هوش مصنوعی", "ai", "فناوری", "tech", "موبایل", "iphone", "android", "گوگل",
-        "مایکروسافت", "اپل", "متا", "اینستاگرام", "تلگرام", "اقتصاد", "سهام", "شرکت"
+
+    # مواردی که به تنهایی نباید دسته را تعیین کنند
+    game_context = [
+        "تاریخ انتشار بازی", "عرضه بازی", "نسخه بازی", "آپدیت بازی",
+        "تریلر بازی", "تریلر گیم‌پلی", "گیم‌پلی", "بازی معرفی شد",
+        "بازی لغو شد", "بازی تأخیر", "بازی تاخیر"
     ]
-    movie_score = sum(3 if x in low else 0 for x in movie_strong)
-    game_score = sum(3 if x in low else 0 for x in game_strong)
-    misc_score = sum(2 if x in low else 0 for x in misc)
-    # داده‌های استخراج‌شده نیز رأی می‌دهند.
-    if isinstance(facts, dict):
-        people = " ".join(map(str, facts.get("people", []) or [])).lower()
-        companies = " ".join(map(str, facts.get("companies", []) or [])).lower()
-        status = str(facts.get("status", "")).lower()
-        entity_blob = people + " " + companies + " " + status
-        if any(x in entity_blob for x in ["actor", "actress", "director", "disney", "netflix", "marvel", "dc"]):
-            movie_score += 5
-        if any(x in entity_blob for x in ["playstation", "xbox", "nintendo", "steam"]):
-            game_score += 5
-    # نشانه‌های سینمایی قوی جلوی اشتباه «🎮» را می‌گیرند.
-    if movie_score >= 6 and movie_score >= game_score * 0.7:
-        return "🎥"
-    if game_score >= 5 and game_score > movie_score:
+    cinema_context = [
+        "تریلر فیلم", "تریلر سریال", "تریلر سینمایی", "فیلم معرفی",
+        "سریال معرفی", "فیلم لغو", "سریال لغو", "فیلمبرداری فیلم",
+        "بازیگر فیلم", "بازیگر سریال", "تاریخ اکران", "تاریخ پخش سریال"
+    ]
+
+    game_score = sum(1 for x in game_strong if x in low)
+    cinema_score = sum(1 for x in cinema_strong if x in low)
+
+    # Context صریح وزن بیشتری دارد.
+    game_score += 5 * sum(1 for x in game_context if x in low)
+    cinema_score += 5 * sum(1 for x in cinema_context if x in low)
+
+    # بعضی واژه‌های مشترک مثل trailer باید از روی همراهی با بازی/سینما تعیین شوند.
+    if "trailer" in low or "تریلر" in low:
+        if has_any(["بازی", "gameplay", "video game", "playstation", "xbox", "nintendo", "steam"]):
+            game_score += 8
+        if has_any(["فیلم", "سریال", "movie", "film", "netflix", "hbo", "marvel", "dc"]):
+            cinema_score += 8
+
+    # داده‌های ساختاریافته نیز کمک می‌کنند، اما نام شرکت به تنهایی کافی نیست.
+    blob = " ".join(
+        str(facts.get(k, "")) for k in
+        ("title", "summary", "topic", "type", "content_type", "status")
+    ).lower()
+    people = " ".join(map(str, facts.get("people", []) or [])).lower()
+    companies = " ".join(map(str, facts.get("companies", []) or [])).lower()
+    blob += " " + people + " " + companies
+
+    if has_any(["playstation", "xbox", "nintendo", "steam", "gameplay"]):
+        game_score += 4
+    if any(x in blob for x in ["actor", "actress", "director", "film", "movie", "series", "cinema"]):
+        cinema_score += 4
+
+    # خروجی دقیقاً یکی از سه استیکر است.
+    if game_score > cinema_score and game_score >= 2:
         return "🎮"
-    if misc_score > max(movie_score, game_score):
-        return "📢"
-    if movie_score > game_score:
+    if cinema_score > game_score and cinema_score >= 2:
         return "🎥"
-    if game_score > movie_score:
+
+    # در حالت مساوی/مبهم، از نشانه صریح فارسی استفاده کن.
+    if any(x in low for x in ["بازی ویدیویی", "بازی ویدئویی", "گیم‌پلی", "گیم پلی", "کنسول"]):
         return "🎮"
+    if any(x in low for x in ["فیلم", "سریال", "سینما", "بازیگر", "کارگردان", "اکران"]):
+        return "🎥"
+
     return "📢"
 
 
@@ -1434,16 +1456,6 @@ FORBIDDEN_OUTPUT_TERMS = [
     "متن کامل مقاله",
     "در این صفحه",
     "fact",
-    "نظر شما",
-    "نظر شما چیست",
-    "نظرتان",
-    "به نظر شما",
-    "در ادامه بخوانید",
-    "ادامه این مطلب",
-    "برای اطلاعات بیشتر",
-    "لینک خبر",
-    "منبع:",
-    "منابع:",
 ]
 
 
@@ -1471,28 +1483,8 @@ def validate_generated_output(generated):
     return True
 
 
-def sanitize_ai_output(generated):
-    """خروجی AI را به تیتر + یک پاراگراف خبری محدود می‌کند."""
-    raw = clean_ai_text(generated or "")
-    raw = re.sub(r"```(?:text|markdown|html)?", "", raw, flags=re.I).replace("```", "")
-    lines = [clean_text(x) for x in raw.splitlines() if clean_text(x)]
-    if not lines:
-        return ""
-    title = lines[0]
-    body = clean_text(" ".join(lines[1:]))
-    for pattern in (
-        r"(?:نظر شما(?: درباره این خبر)?(?: چیست)?[؟?]?).*$",
-        r"(?:به نظر شما.*[؟?]).*$",
-        r"(?:نظرتان.*[؟?]).*$",
-        r"(?:برای اطلاعات بیشتر.*)$",
-        r"(?:ادامه این مطلب.*)$",
-    ):
-        body = re.sub(pattern, "", body, flags=re.I).strip()
-    body = re.sub(r"(?<!\w)#[\w\u0600-\u06FF-]+", "", body).strip()
-    return title + ("\n" + body if body else "")
-
 def format_post(generated):
-    generated = sanitize_ai_output(generated)
+    generated = clean_ai_text(generated)
 
     title, sentences = split_sentences(generated)
 
@@ -1871,6 +1863,10 @@ async def process_news(message, text):
                 reply_markup=None,
             )
 
+        await message.answer(
+            "✅ خبر آماده انتشار است.",
+            reply_markup=main_keyboard(),
+        )
 
     except Exception as error:
         log.exception("News processing error")
@@ -2571,13 +2567,11 @@ def build_custom_post(title, body, source=None, facts=None):
     body = re.sub(r"(?<!\w)#[\w\u0600-\u06FF-]+", "", body).strip()
     if not title or not body:
         return ""
-    category = detect_category(title + " " + body)
-    prefix = ""
-    if is_breaking(source or {}, facts or {}):
-        prefix = "🚨 "
-    # هشتگ و برچسب احتمال اسپویل عمداً در v5.11.0 حذف شده‌اند.
+    category = detect_category(title + " " + body, facts)
+    # تیتر فقط با یکی از سه استیکر دسته‌بندی آغاز می‌شود؛
+    # Breaking هرگز استیکر ابتدای تیتر را تغییر نمی‌دهد.
     return (
-        "<b>" + escape_html(prefix + category + " " + title) + "</b>\n\n"
+        "<b>" + escape_html(category + " " + title) + "</b>\n\n"
         + "🟣 " + escape_html(body)
         + "\n\n<b>🆔 @Gamefa_official</b>"
     )
@@ -4718,7 +4712,7 @@ async def debug_command_v511(message: Message):
     if not is_admin(message): return
     results=await v56_health_check()
     await message.answer(
-        "🛠 <b>Gamefa Bot Debug v5.13.0</b>\n\n"
+        "🛠 <b>Gamefa Bot Debug v5.12.0</b>\n\n"
         f"🤖 مدل: <code>{escape_html(MODEL)}</code>\n"
         f"🧠 AI Editor: {'🟢' if AI_EDITOR_ENABLED else '🔴'}\n"
         f"🧬 Semantic Duplicate: {'🟢' if ENABLE_SEMANTIC_DUPLICATE else '🔴'}\n"
