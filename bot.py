@@ -2592,7 +2592,7 @@ def key_health_snapshot():
 
 def editorial_dashboard_text():
     return (
-        "📊 <b>داشبورد تحریریه v5.8.0</b>\n\n"
+        "📊 <b>داشبورد تحریریه v5.15.0</b>\n\n"
         f"📰 پردازش‌شده: <b>{editorial_stats.get('processed',0)}</b>\n"
         f"📢 منتشرشده: <b>{editorial_stats.get('published',0)}</b>\n"
         f"♻️ تکراری: <b>{editorial_stats.get('duplicates',0)}</b>\n"
