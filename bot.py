@@ -25,7 +25,6 @@ from aiogram.enums import ParseMode
 from aiogram.filters import Command
 from aiogram.types import (
     Message,
-    CallbackQuery,
     FSInputFile,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
@@ -57,18 +56,6 @@ HEADLINE_WORD_LIMIT = None
 MAX_NEWS_SENTENCES = 10
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
-
-# Railway API integration (v5.18.0)
-# Project token: RAILWAY_TOKEN or RAILWAY_PROJECT_TOKEN -> Project-Access-Token
-# Account/workspace token: RAILWAY_API_TOKEN -> Authorization: Bearer
-RAILWAY_TOKEN = os.getenv("RAILWAY_PROJECT_TOKEN", os.getenv("RAILWAY_TOKEN", "")).strip()
-RAILWAY_API_TOKEN = os.getenv("RAILWAY_API_TOKEN", "").strip()
-RAILWAY_API_URL = os.getenv("RAILWAY_API_URL", "https://backboard.railway.com/graphql/v2").strip()
-RAILWAY_PROJECT_ID = os.getenv("RAILWAY_PROJECT_ID", "").strip()
-RAILWAY_ENVIRONMENT_ID = os.getenv("RAILWAY_ENVIRONMENT_ID", "").strip()
-RAILWAY_SERVICE_ID = os.getenv("RAILWAY_SERVICE_ID", "").strip()
-RAILWAY_DEPLOY_AFTER_KEY_CHANGE = os.getenv("RAILWAY_DEPLOY_AFTER_KEY_CHANGE", "1").strip().lower() in ("1", "true", "yes", "on")
-RAILWAY_KEY_LIMIT = 10
 CHANNEL_ID = os.getenv("CHANNEL_ID", "@Gamefa_official").strip()
 
 MODEL = os.getenv("OPENAI_MODEL", "gpt-5.4-mini").strip()
@@ -169,16 +156,22 @@ except Exception:
 
 OPENAI_KEYS = []
 
-V518_OPENAI_KEY_NAMES = tuple(f"OPENAI_API_KEY_{i}" for i in range(1, 11))
+V517_OPENAI_KEY_NAMES = (
+    "OPENAI_API_KEY_1",
+    "OPENAI_API_KEY_2",
+    "OPENAI_API_KEY_3",
+    "OPENAI_API_KEY_4",
+    "OPENAI_API_KEY_5",
+)
 
-# v5.18.0: the ten numbered slots are used for the primary pool.
+# v5.18.0: only the five numbered slots are used for the primary pool.
 
-for i, env_name in enumerate(V518_OPENAI_KEY_NAMES, 1):
+for i, env_name in enumerate(V517_OPENAI_KEY_NAMES, 1):
     key = os.getenv(env_name, "").strip()
     if key:
         OPENAI_KEYS.append(key)
 
-# Legacy compatibility is used only when no numbered key exists, so the pool never exceeds ten keys.
+# Legacy compatibility is used only when no numbered key exists, so the pool never exceeds five keys.
 legacy_key = os.getenv("OPENAI_API_KEY", "").strip()
 if not OPENAI_KEYS and legacy_key:
     OPENAI_KEYS.append(legacy_key)
@@ -196,7 +189,6 @@ OPENAI_KEY_TOTAL_ATTEMPTS = {}
 memory = []
 prepared = {}
 processing_users = set()
-railway_key_pending = {}
 
 logging.basicConfig(
     level=logging.INFO,
@@ -586,6 +578,43 @@ def detect_category(text, facts=None):
     game_score = sum(1 for x in game_strong if x in low)
     cinema_score = sum(1 for x in cinema_strong if x in low)
 
+    # نام فرنچایزها/بازی‌های شناخته‌شده برای تیترهایی که در آن‌ها
+    # کلمه «بازی» وجود ندارد؛ این نام‌ها باید به‌عنوان نشانه قوی
+    # محتوای گیمینگ در نظر گرفته شوند.
+    game_franchises = [
+        "call of duty", "modern warfare", "black ops", "warzone",
+        "grand theft auto", "gta", "red dead redemption", "red dead",
+        "battlefield", "assassin's creed", "assassins creed",
+        "resident evil", "silent hill", "metal gear", "death stranding",
+        "god of war", "the last of us", "ghost of tsushima",
+        "spider-man", "spider man", "alan wake", "cyberpunk 2077",
+        "the witcher", "elden ring", "dark souls", "bloodborne",
+        "sekiro", "monster hunter", "final fantasy", "dragon quest",
+        "persona", "pokemon", "zelda", "mario", "halo", "gears of war",
+        "forza", "fable", "starfield", "fallout", "elder scrolls",
+        "doom", "minecraft", "fortnite", "valorant", "counter-strike",
+        "cs2", "overwatch", "apex legends", "helldivers", "destiny",
+        "diablo", "baldur's gate", "civilization", "far cry",
+        "watch dogs", "prince of persia", "tekken", "street fighter",
+        "mortal kombat", "ea sports fc", "fifa", "nba 2k", "wwe 2k",
+        "need for speed", "gran turismo", "star wars jedi"
+    ]
+    franchise_hits = sum(1 for x in game_franchises if x in low)
+    game_score += franchise_hits * 12
+
+    # نام یک فرنچایز به همراه نشانه‌های بازی/پیش‌خرید/کمپین/بتا
+    # اطمینان را بیشتر می‌کند.
+    game_context_terms = [
+        "پیش‌خرید", "پیش خرید", "کمپین", "چندنفره", "چند نفره",
+        "بخش چندنفره", "بخش چند نفره", "بتا", "گیم‌پلی", "گیم پلی",
+        "بازیکن", "بازیکنان", "dlc", "gameplay", "multiplayer",
+        "single-player", "single player", "campaign", "pre-order",
+        "preorder", "beta", "digital edition", "vault edition"
+    ]
+    game_context_hits = sum(1 for x in game_context_terms if x in low)
+    if franchise_hits and game_context_hits:
+        game_score += 8
+
     # Context صریح وزن بیشتری دارد.
     game_score += 5 * sum(1 for x in game_context if x in low)
     cinema_score += 5 * sum(1 for x in cinema_context if x in low)
@@ -606,7 +635,16 @@ def detect_category(text, facts=None):
     companies = " ".join(map(str, facts.get("companies", []) or [])).lower()
     blob += " " + people + " " + companies
 
-    if has_any(["playstation", "xbox", "nintendo", "steam", "gameplay"]):
+    # نام پلتفرم به‌تنهایی نشانه کافی برای خبر بازی نیست؛
+    # فقط وقتی کنار نشانه گیمینگ/فرنچایز آمده باشد امتیاز اضافه می‌کند.
+    platform_terms = ["playstation", "xbox", "nintendo", "steam", "gameplay"]
+    platform_present = has_any(platform_terms)
+    game_signal_present = (
+        franchise_hits > 0
+        or game_context_hits > 0
+        or has_any(["بازی", "گیم", "game", "gaming", "gameplay"])
+    )
+    if platform_present and game_signal_present:
         game_score += 4
     if any(x in blob for x in ["actor", "actress", "director", "film", "movie", "series", "cinema"]):
         cinema_score += 4
@@ -1681,9 +1719,6 @@ def settings_keyboard():
                 KeyboardButton(text="✍️ قالب خبر"),
             ],
             [
-                KeyboardButton(text="🔐 مدیریت OpenAI"),
-            ],
-            [
                 KeyboardButton(text="🔙 بازگشت"),
             ],
         ],
@@ -1959,274 +1994,6 @@ async def publish_news(message, user_id):
         )
 
 
-
-# ============================================================
-# RAILWAY OPENAI KEY MANAGER — v5.18.0
-# ============================================================
-
-RAILWAY_KEY_RE = re.compile(r"^sk-[A-Za-z0-9_.-]{20,}$")
-
-
-def railway_configured():
-    return bool(
-        (RAILWAY_TOKEN or RAILWAY_API_TOKEN)
-        and (RAILWAY_SERVICE_ID or os.getenv("RAILWAY_SERVICE_ID"))
-    )
-
-
-def railway_headers():
-    if RAILWAY_API_TOKEN:
-        return {
-            "Authorization": f"Bearer {RAILWAY_API_TOKEN}",
-            "Content-Type": "application/json",
-        }
-    return {
-        "Project-Access-Token": RAILWAY_TOKEN,
-        "Content-Type": "application/json",
-    }
-
-
-async def railway_graphql(query, variables=None, timeout=35):
-    if not (RAILWAY_TOKEN or RAILWAY_API_TOKEN):
-        raise RuntimeError("RAILWAY_TOKEN یا RAILWAY_API_TOKEN تنظیم نشده است.")
-
-    payload = {
-        "query": query,
-        "variables": variables or {},
-    }
-    client_timeout = aiohttp.ClientTimeout(total=timeout)
-    async with aiohttp.ClientSession(timeout=client_timeout) as session:
-        async with session.post(
-            RAILWAY_API_URL,
-            headers=railway_headers(),
-            json=payload,
-        ) as response:
-            raw = await response.text()
-            try:
-                data = json.loads(raw)
-            except Exception:
-                raise RuntimeError(f"Railway API HTTP {response.status}: {raw[:500]}")
-
-            if response.status >= 400:
-                raise RuntimeError(
-                    f"Railway API HTTP {response.status}: "
-                    f"{json.dumps(data, ensure_ascii=False)[:900]}"
-                )
-            if data.get("errors"):
-                raise RuntimeError(
-                    "Railway GraphQL: " +
-                    "; ".join(str(x.get("message", x)) for x in data["errors"])
-                )
-            return data.get("data", {})
-
-
-async def railway_resolve_ids():
-    """Use Railway-provided IDs when available; project tokens can self-report project/env."""
-    global RAILWAY_PROJECT_ID, RAILWAY_ENVIRONMENT_ID, RAILWAY_SERVICE_ID
-
-    RAILWAY_PROJECT_ID = RAILWAY_PROJECT_ID or os.getenv("RAILWAY_PROJECT_ID", "").strip()
-    RAILWAY_ENVIRONMENT_ID = RAILWAY_ENVIRONMENT_ID or os.getenv("RAILWAY_ENVIRONMENT_ID", "").strip()
-    RAILWAY_SERVICE_ID = RAILWAY_SERVICE_ID or os.getenv("RAILWAY_SERVICE_ID", "").strip()
-
-    if not RAILWAY_PROJECT_ID or not RAILWAY_ENVIRONMENT_ID:
-        if RAILWAY_TOKEN and not RAILWAY_API_TOKEN:
-            data = await railway_graphql("""
-                query {
-                  projectToken { projectId environmentId }
-                }
-            """)
-            info = data.get("projectToken") or {}
-            RAILWAY_PROJECT_ID = RAILWAY_PROJECT_ID or str(info.get("projectId", ""))
-            RAILWAY_ENVIRONMENT_ID = RAILWAY_ENVIRONMENT_ID or str(info.get("environmentId", ""))
-
-    if not RAILWAY_SERVICE_ID:
-        raise RuntimeError(
-            "RAILWAY_SERVICE_ID پیدا نشد. این متغیر را در Railway تنظیم کن."
-        )
-    if not RAILWAY_PROJECT_ID or not RAILWAY_ENVIRONMENT_ID:
-        raise RuntimeError(
-            "RAILWAY_PROJECT_ID یا RAILWAY_ENVIRONMENT_ID پیدا نشد."
-        )
-    return RAILWAY_PROJECT_ID, RAILWAY_ENVIRONMENT_ID, RAILWAY_SERVICE_ID
-
-
-async def railway_get_openai_variables():
-    project_id, environment_id, service_id = await railway_resolve_ids()
-    data = await railway_graphql(
-        """
-        query variables($projectId: String!, $environmentId: String!, $serviceId: String) {
-          variables(projectId: $projectId, environmentId: $environmentId, serviceId: $serviceId)
-        }
-        """,
-        {
-            "projectId": project_id,
-            "environmentId": environment_id,
-            "serviceId": service_id,
-        },
-    )
-    variables = data.get("variables") or {}
-    return {
-        f"OPENAI_API_KEY_{i}": str(variables.get(f"OPENAI_API_KEY_{i}") or "")
-        for i in range(1, RAILWAY_KEY_LIMIT + 1)
-    }
-
-
-async def railway_apply_openai_variables(values, delete_names=None, deploy=True):
-    """Batch all changes, optionally skipping deploys, then trigger exactly one deploy."""
-    project_id, environment_id, service_id = await railway_resolve_ids()
-    values = {
-        str(k): str(v)
-        for k, v in (values or {}).items()
-        if re.fullmatch(r"OPENAI_API_KEY_(?:[1-9]|10)", str(k)) and str(v).strip()
-    }
-    delete_names = [
-        str(name) for name in (delete_names or [])
-        if re.fullmatch(r"OPENAI_API_KEY_(?:[1-9]|10)", str(name))
-    ]
-
-    if values:
-        await railway_graphql(
-            """
-            mutation variableCollectionUpsert($input: VariableCollectionUpsertInput!) {
-              variableCollectionUpsert(input: $input)
-            }
-            """,
-            {
-                "input": {
-                    "projectId": project_id,
-                    "environmentId": environment_id,
-                    "serviceId": service_id,
-                    "variables": values,
-                    "skipDeploys": True,
-                }
-            },
-        )
-
-    for name in delete_names:
-        await railway_graphql(
-            """
-            mutation variableDelete($input: VariableDeleteInput!) {
-              variableDelete(input: $input)
-            }
-            """,
-            {
-                "input": {
-                    "projectId": project_id,
-                    "environmentId": environment_id,
-                    "serviceId": service_id,
-                    "name": name,
-                    "skipDeploys": True,
-                }
-            },
-        )
-
-    if deploy and RAILWAY_DEPLOY_AFTER_KEY_CHANGE and (values or delete_names):
-        await railway_graphql(
-            """
-            mutation serviceInstanceDeploy($serviceId: String!, $environmentId: String!) {
-              serviceInstanceDeploy(serviceId: $serviceId, environmentId: $environmentId)
-            }
-            """,
-            {
-                "serviceId": service_id,
-                "environmentId": environment_id,
-            },
-        )
-
-
-def mask_secret(value):
-    value = str(value or "")
-    if not value:
-        return "—"
-    if len(value) <= 10:
-        return "••••••••"
-    return value[:7] + "••••" + value[-4:]
-
-
-def railway_key_panel_lines(values):
-    lines = [
-        "🔐 <b>مدیریت OpenAI</b>",
-        "",
-        f"کلیدهای ثبت‌شده: <b>{sum(bool(v) for v in values.values())}</b> / {RAILWAY_KEY_LIMIT}",
-        "",
-    ]
-    for i in range(1, RAILWAY_KEY_LIMIT + 1):
-        name = f"OPENAI_API_KEY_{i}"
-        value = values.get(name, "")
-        status = "🟢 ثبت‌شده" if value else "⚪ خالی"
-        lines.append(f"<b>{i}.</b> {status} — <code>{escape_html(mask_secret(value))}</code>")
-    lines += [
-        "",
-        "🔒 کلید کامل در ربات نمایش داده نمی‌شود.",
-        "⚠️ بعد از ذخیره، Railway یک Deployment برای اعمال کلیدهای جدید انجام می‌دهد.",
-    ]
-    return lines
-
-
-def railway_keys_keyboard():
-    rows = []
-    for i in range(1, RAILWAY_KEY_LIMIT + 1):
-        rows.append([
-            InlineKeyboardButton(text=f"🔑 ثبت/تغییر کلید {i}", callback_data=f"rk_set:{i}"),
-            InlineKeyboardButton(text=f"🗑 حذف {i}", callback_data=f"rk_del:{i}"),
-        ])
-    rows += [
-        [InlineKeyboardButton(text="🔄 همگام‌سازی از Railway", callback_data="rk_refresh")],
-        [InlineKeyboardButton(text="🧪 تست کلیدها", callback_data="rk_test")],
-        [InlineKeyboardButton(text="🏠 بازگشت", callback_data="home")],
-    ]
-    return InlineKeyboardMarkup(inline_keyboard=rows)
-
-
-async def show_railway_key_panel(target):
-    if not railway_configured():
-        text = (
-            "🔐 <b>مدیریت OpenAI</b>\n\n"
-            "برای فعال شدن این پنل باید این متغیرها را در Railway تنظیم کنی:\n\n"
-            "<code>RAILWAY_PROJECT_TOKEN</code> یا <code>RAILWAY_TOKEN</code>\n"
-            "<code>RAILWAY_SERVICE_ID</code>\n\n"
-            "اگر از Account/Workspace Token استفاده می‌کنی:\n"
-            "<code>RAILWAY_API_TOKEN</code>\n\n"
-            "Project/Environment ID در صورت نبودن، برای Project Token خودکار پیدا می‌شود."
-        )
-        await target.answer(text, parse_mode=ParseMode.HTML, reply_markup=railway_keys_keyboard())
-        return
-
-    values = await railway_get_openai_variables()
-    await target.answer(
-        "\n".join(railway_key_panel_lines(values)),
-        parse_mode=ParseMode.HTML,
-        reply_markup=railway_keys_keyboard(),
-    )
-
-
-async def validate_openai_key(key):
-    key = key.strip()
-    if not RAILWAY_KEY_RE.match(key):
-        return False, "فرمت کلید OpenAI معتبر به نظر نمی‌رسد."
-    try:
-        client = AsyncOpenAI(api_key=key)
-        # مدل‌ها فقط برای اعتبارسنجی دسترسی کلید خوانده می‌شوند؛ متن یا توکن تولید نمی‌شود.
-        await client.models.list()
-        return True, "کلید معتبر است."
-    except Exception as error:
-        return False, str(error)[:700]
-
-
-async def railway_test_all_keys(values):
-    results = []
-    for i in range(1, RAILWAY_KEY_LIMIT + 1):
-        key = values.get(f"OPENAI_API_KEY_{i}", "").strip()
-        if not key:
-            results.append(f"{i}. ⚪ خالی")
-            continue
-        ok, reason = await validate_openai_key(key)
-        results.append(
-            f"{i}. {'🟢 معتبر' if ok else '🔴 نامعتبر'}"
-            + ("" if ok else f" — {escape_html(reason[:180])}")
-        )
-    return results
-
 # ============================================================
 # ROUTER
 # ============================================================
@@ -2320,6 +2087,17 @@ async def link_news(message: Message):
     )
 
 
+@router.message(F.text == "📊 داشبورد")
+async def dashboard_menu(message: Message):
+    if not is_admin(message):
+        return
+    await message.answer(
+        editorial_dashboard_text(),
+        parse_mode=ParseMode.HTML,
+        reply_markup=main_keyboard(),
+    )
+
+
 # ============================================================
 # ARCHIVE
 # ============================================================
@@ -2392,6 +2170,12 @@ async def clear_archive(message: Message):
 # ============================================================
 # STATS
 # ============================================================
+
+@router.message(F.text == "📊 آمار")
+async def stats(message: Message):
+    # Health-aware implementation is defined later in v5.18.0 and resolved at runtime.
+    return await stats_v56(message)
+
 
 # ============================================================
 # SETTINGS
@@ -2496,6 +2280,16 @@ async def publish_command_disabled(message: Message):
     )
 
 
+@router.message(Command("stats"))
+async def stats_command(message: Message):
+    if not is_admin(message):
+        return
+
+    await message.answer(
+        f"📊 تعداد اخبار آرشیو: {len(memory)}"
+    )
+
+
 @router.message(Command("clear"))
 async def clear_command(message: Message):
     if not is_admin(message):
@@ -2525,50 +2319,10 @@ async def text_handler(message: Message):
     if not text or text.startswith("/"):
         return
 
-    pending_key = railway_key_pending.get(message.from_user.id)
-    if pending_key:
-        index = int(pending_key.get("index", 0))
-        action = pending_key.get("action")
-        if action == "set":
-            if len(text) > 300:
-                await message.answer("❌ کلید بیش از حد طولانی است.")
-                return
-            try:
-                await message.delete()
-            except Exception:
-                pass
-            await message.answer("🔍 در حال اعتبارسنجی کلید...", reply_markup=settings_keyboard())
-            ok, reason = await validate_openai_key(text)
-            if not ok:
-                railway_key_pending.pop(message.from_user.id, None)
-                await message.answer("❌ کلید معتبر نیست:\n\n" + reason[:900], reply_markup=settings_keyboard())
-                return
-            try:
-                name = f"OPENAI_API_KEY_{index}"
-                await railway_apply_openai_variables(
-                    {name: text},
-                    [],
-                    deploy=RAILWAY_DEPLOY_AFTER_KEY_CHANGE,
-                )
-                railway_key_pending.pop(message.from_user.id, None)
-                # Clear sensitive input from the in-memory pending state immediately.
-                await message.answer(
-                    f"✅ کلید شماره <b>{index}</b> با موفقیت در Railway ثبت شد.\n\n"
-                    "🚀 Deployment جدید برای اعمال آن شروع شده است.",
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=settings_keyboard(),
-                )
-            except Exception as error:
-                railway_key_pending.pop(message.from_user.id, None)
-                await message.answer(
-                    "❌ ثبت کلید در Railway ناموفق بود:\n\n" + str(error)[:1200],
-                    reply_markup=settings_keyboard(),
-                )
-            return
-
     menu_words = {
         "🔎 بررسی خبر جدید",
         "📁 آرشیو",
+        "📊 آمار",
         "⚙️ تنظیمات",
         "📝 ارسال خبر",
         "🔗 ارسال لینک",
@@ -2578,7 +2332,6 @@ async def text_handler(message: Message):
         "🧠 مدل AI",
         "🖼 سیستم تصویر",
         "✍️ قالب خبر",
-        "🔐 مدیریت OpenAI",
         "🔙 بازگشت",
     }
 
@@ -2885,6 +2638,24 @@ def key_health_snapshot():
     return rows or ["❌ کلیدی تنظیم نشده است"]
 
 
+def editorial_dashboard_text():
+    return (
+        "📊 <b>داشبورد تحریریه v5.18.0</b>\n\n"
+        f"📰 پردازش‌شده: <b>{editorial_stats.get('processed',0)}</b>\n"
+        f"📢 منتشرشده: <b>{editorial_stats.get('published',0)}</b>\n"
+        f"♻️ تکراری: <b>{editorial_stats.get('duplicates',0)}</b>\n"
+        f"❌ ناموفق: <b>{editorial_stats.get('failed',0)}</b>\n"
+        f"🖼 تصویر موفق: <b>{editorial_stats.get('images_ok',0)}</b>\n"
+        f"🚨 Breaking: <b>{editorial_stats.get('breaking',0)}</b>\n"
+        f"🔎 Web Search: <b>{editorial_stats.get('web_search',0)}</b>\n"
+        f"🌐 چندمنبعی: <b>{editorial_stats.get('multi_source',0)}</b>\n"
+        f"✏️ اصلاحات: <b>{editorial_stats.get('edits',0)}</b>\n"
+        f"🔄 بازنویسی: <b>{editorial_stats.get('rewrites',0)}</b>\n"
+        f"📥 بیشترین صف: <b>{editorial_stats.get('queue_max',0)}</b>\n\n"
+        "🔑 <b>وضعیت کلیدها</b>\n" + "\n".join(key_health_snapshot())
+    )
+
+
 async def smart_image_download(source):
     """تصویر را دانلود و از نظر اندازه/فرمت بررسی می‌کند."""
     url = source.get("image", "")
@@ -3157,6 +2928,14 @@ async def cancel_current_callback(callback):
     await callback.message.answer("❌ خبر آماده انتشار لغو شد.", reply_markup=main_keyboard())
 
 
+@router.callback_query(F.data == "dashboard")
+async def dashboard_callback(callback):
+    if not is_admin_id(callback.from_user.id):
+        await callback.answer("⛔ دسترسی ندارید.", show_alert=True); return
+    await callback.answer()
+    await callback.message.answer(editorial_dashboard_text(), parse_mode=ParseMode.HTML, reply_markup=main_keyboard())
+
+
 # ============================================================
 # ADVANCED TEXT CONTROL
 # ============================================================
@@ -3201,92 +2980,16 @@ async def handle_editorial_text(message):
 # COMMANDS / MENU EXTENSIONS
 # ============================================================
 
+@router.message(Command("dashboard"))
+async def dashboard_command(message: Message):
+    if not is_admin(message): return
+    await message.answer(editorial_dashboard_text(), parse_mode=ParseMode.HTML, reply_markup=main_keyboard())
+
+
 @router.message(Command("keys"))
 async def keys_command(message: Message):
-    if not is_admin(message):
-        return
-    try:
-        await show_railway_key_panel(message)
-    except Exception as error:
-        await message.answer("❌ خطا در مدیریت کلیدها:\n\n" + str(error)[:1200])
-
-
-@router.callback_query(F.data.startswith("rk_set:"))
-async def railway_set_key_callback(callback: CallbackQuery):
-    if not is_admin_id(callback.from_user.id):
-        await callback.answer("⛔ دسترسی ندارید.", show_alert=True)
-        return
-    index = int(callback.data.split(":", 1)[1])
-    if not 1 <= index <= RAILWAY_KEY_LIMIT:
-        await callback.answer("کلید نامعتبر است.", show_alert=True)
-        return
-    railway_key_pending[callback.from_user.id] = {"action": "set", "index": index}
-    await callback.answer()
-    await callback.message.answer(
-        f"🔑 کلید شماره <b>{index}</b> را ارسال کن.\n\n"
-        "کلید در پیام تلگرام ذخیره نمی‌شود و پس از اعتبارسنجی مستقیم در Railway ثبت می‌شود.\n\n"
-        "برای لغو: <code>/cancelkey</code>",
-        parse_mode=ParseMode.HTML,
-    )
-
-
-@router.callback_query(F.data.startswith("rk_del:"))
-async def railway_delete_key_callback(callback: CallbackQuery):
-    if not is_admin_id(callback.from_user.id):
-        await callback.answer("⛔ دسترسی ندارید.", show_alert=True)
-        return
-    index = int(callback.data.split(":", 1)[1])
-    name = f"OPENAI_API_KEY_{index}"
-    try:
-        await callback.answer("در حال حذف...")
-        await callback.message.answer(f"🗑 در حال حذف <b>کلید {index}</b> از Railway...", parse_mode=ParseMode.HTML)
-        await railway_apply_openai_variables({}, [name], deploy=RAILWAY_DEPLOY_AFTER_KEY_CHANGE)
-        await callback.message.answer("✅ کلید حذف شد. Railway در حال اعمال Deployment جدید است.")
-    except Exception as error:
-        await callback.message.answer("❌ حذف کلید ناموفق بود:\n\n" + str(error)[:1200])
-
-
-@router.callback_query(F.data == "rk_refresh")
-async def railway_refresh_callback(callback: CallbackQuery):
-    if not is_admin_id(callback.from_user.id):
-        await callback.answer("⛔ دسترسی ندارید.", show_alert=True)
-        return
-    try:
-        await callback.answer("در حال دریافت...")
-        values = await railway_get_openai_variables()
-        await callback.message.answer(
-            "\n".join(railway_key_panel_lines(values)),
-            parse_mode=ParseMode.HTML,
-            reply_markup=railway_keys_keyboard(),
-        )
-    except Exception as error:
-        await callback.message.answer("❌ همگام‌سازی ناموفق بود:\n\n" + str(error)[:1200])
-
-
-@router.callback_query(F.data == "rk_test")
-async def railway_test_callback(callback: CallbackQuery):
-    if not is_admin_id(callback.from_user.id):
-        await callback.answer("⛔ دسترسی ندارید.", show_alert=True)
-        return
-    try:
-        await callback.answer("تست شروع شد...")
-        values = await railway_get_openai_variables()
-        results = await railway_test_all_keys(values)
-        await callback.message.answer(
-            "🧪 <b>نتیجه تست کلیدها</b>\n\n" + "\n".join(results),
-            parse_mode=ParseMode.HTML,
-            reply_markup=railway_keys_keyboard(),
-        )
-    except Exception as error:
-        await callback.message.answer("❌ تست کلیدها ناموفق بود:\n\n" + str(error)[:1200])
-
-
-@router.message(Command("cancelkey"))
-async def cancel_key_command(message: Message):
-    if not is_admin(message):
-        return
-    railway_key_pending.pop(message.from_user.id, None)
-    await message.answer("✅ ثبت کلید لغو شد.", reply_markup=settings_keyboard())
+    if not is_admin(message): return
+    await message.answer("🔑 <b>وضعیت کلیدهای OpenAI</b>\n\n" + "\n".join(key_health_snapshot()), parse_mode=ParseMode.HTML)
 
 
 @router.message(Command("queue"))
@@ -3485,6 +3188,31 @@ def v56_category_label(category):
 
 
 # Health-aware stats endpoint for the redesigned panel.
+@router.message(F.text == "📊 آمار")
+async def stats_v56(message: Message):
+    if not is_admin(message):
+        return
+    results = await v56_health_check()
+    web_count = sum(1 for item in memory if item.get("web_search_used"))
+    healthy = sum(1 for x in results.values() if x.get("status") == "ok")
+    await message.answer(
+        "📊 <b>مرکز آمار Gamefa</b>\n\n"
+        f"⚡ نسخه: <b>{BOT_VERSION}</b>\n"
+        f"📰 آرشیو: <b>{len(memory)}</b> / {MAX_MEMORY}\n"
+        f"🧠 مدل: <code>{escape_html(MODEL)}</code>\n"
+        f"🔑 کلیدها: <b>{len(OPENAI_KEYS)}</b> • سالم: <b>{healthy}</b>\n"
+        f"🌐 Web Search: <b>{web_count}</b>\n"
+        f"📥 صف: <b>{len(news_queue)}</b> / {MAX_QUEUE}\n"
+        f"🎯 پردازش موفق: <b>{editorial_stats.get('processed',0)}</b>\n"
+        f"♻️ تکراری: <b>{editorial_stats.get('duplicates',0)}</b>\n"
+        f"🖼 تصویر موفق: <b>{editorial_stats.get('images_ok',0)}</b>\n\n"
+        "🔐 <b>Health Check کلیدها</b>\n" + "\n".join(v56_health_lines(results)) +
+        "\n\n🔎 Web Search fallback: " + ("<b>فعال</b>" if ENABLE_WEB_SEARCH_FALLBACK else "<b>غیرفعال</b>"),
+        parse_mode=ParseMode.HTML,
+        reply_markup=main_keyboard(),
+    )
+
+
 @router.message(Command("health"))
 async def health_command(message: Message):
     if not is_admin(message):
@@ -5074,11 +4802,11 @@ advanced_process_news = v511_process_news
 # ============================================================
 # GAMEFA BOT v5.18.0 — STABILITY CONTRACT
 # ============================================================
-V518_VERSION="v5.18.0"
-V518_MAX_KEYS=10
-V518_UI_DASHBOARD_ENABLED=False
-V518_UI_STATS_ENABLED=False
-V518_ALLOWED_STICKERS=("🎮","🎥","📢")
+V517_VERSION="v5.18.0"
+V517_MAX_KEYS=5
+V517_UI_DASHBOARD_ENABLED=False
+V517_UI_STATS_ENABLED=False
+V517_ALLOWED_STICKERS=("🎮","🎥","📢")
 
 def v517_key_status(index):
     if index in OPENAI_DISABLED_KEYS: return "disabled"
@@ -5115,15 +4843,15 @@ def v517_key_mask(index):
     return key[:4]+"…"+key[-4:] if len(key)>8 else "••••"
 
 def v517_validate_key_pool():
-    if len(OPENAI_KEYS)>V518_MAX_KEYS: raise RuntimeError("بیش از ده کلید OpenAI تنظیم شده است.")
+    if len(OPENAI_KEYS)>V517_MAX_KEYS: raise RuntimeError("بیش از پنج کلید OpenAI تنظیم شده است.")
     if not OPENAI_KEYS: raise RuntimeError("هیچ کلید OpenAI تنظیم نشده است.")
     return True
 
-def v517_validate_sticker(sticker): return sticker in V518_ALLOWED_STICKERS
+def v517_validate_sticker(sticker): return sticker in V517_ALLOWED_STICKERS
 
 def v517_validate_final_post(post):
     text=re.sub(r"<[^>]+>","",str(post or "")).strip()
-    if not text or text[:1] not in V518_ALLOWED_STICKERS: return False
+    if not text or text[:1] not in V517_ALLOWED_STICKERS: return False
     if "🆔 @Gamefa_official" not in text: return False
     return True
 
@@ -5134,16 +4862,16 @@ def v517_cleanup_cooldowns():
 
 def v517_startup_check():
     v517_validate_key_pool(); v517_cleanup_cooldowns()
-    if len(OPENAI_KEYS)<10: log.info("v5.18.0: %s/10 numbered OpenAI keys configured.",len(OPENAI_KEYS))
-    else: log.info("v5.18.0: all ten numbered OpenAI keys configured.")
+    if len(OPENAI_KEYS)<5: log.warning("v5.18.0: %s/5 numbered OpenAI keys configured.",len(OPENAI_KEYS))
+    else: log.info("v5.18.0: all five numbered OpenAI keys configured.")
     return True
 
 def v517_pool_snapshot():
     return [{"key":i+1,"status":v517_key_status(i),"attempts":v517_key_attempts(i),"success":v517_key_successes(i),"failures":v517_key_failures(i),"rate":v517_key_success_rate(i)} for i in range(len(OPENAI_KEYS))]
 
-def v517_dashboard_is_removed(): return V518_UI_DASHBOARD_ENABLED is False
+def v517_dashboard_is_removed(): return V517_UI_DASHBOARD_ENABLED is False
 
-def v517_stats_is_removed(): return V518_UI_STATS_ENABLED is False
+def v517_stats_is_removed(): return V517_UI_STATS_ENABLED is False
 
 # v5.18.0 stability invariant 001: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
 # v5.18.0 stability invariant 002: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
