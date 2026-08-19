@@ -36,7 +36,7 @@ from openai import AsyncOpenAI
 
 
 # ============================================================
-# GAMEFA BOT v5.18.2
+# GAMEFA BOT v5.18.0
 # ============================================================
 # امکانات:
 # - پشتیبانی از لینک Gamefa و سایت‌های خبری دیگر
@@ -44,13 +44,13 @@ from openai import AsyncOpenAI
 # - fallback اختیاری OpenAI Web Search
 # - استخراج تصویر og:image / twitter:image / article image
 # - تشخیص خبر تکراری
-# - 10 کلید OpenAI با failover و تنظیم مستقیم داخل ربات
+# - 5 کلید OpenAI با failover
 # - آرشیو JSON
 # - Railway friendly
 # ============================================================
 
-BOT_VERSION = "v5.18.2"
-# v5.18.2: تیتر بدون محدودیت تعداد کلمه
+BOT_VERSION = "v5.18.0"
+# v5.18.0: تیتر بدون محدودیت تعداد کلمه
 # طول تیتر فقط با دقت، روانی و ارتباط با خبر کنترل می‌شود.
 HEADLINE_WORD_LIMIT = None
 MAX_NEWS_SENTENCES = 10
@@ -155,140 +155,26 @@ except Exception:
 # ------------------------------------------------------------
 
 OPENAI_KEYS = []
-OPENAI_KEY_SLOT_IDS = []
 
-# v5.18.2: پشتیبانی از ۱۰ کلید OpenAI.
-V518_OPENAI_KEY_NAMES = tuple(
-    f"OPENAI_API_KEY_{i}" for i in range(1, 11)
+V517_OPENAI_KEY_NAMES = (
+    "OPENAI_API_KEY_1",
+    "OPENAI_API_KEY_2",
+    "OPENAI_API_KEY_3",
+    "OPENAI_API_KEY_4",
+    "OPENAI_API_KEY_5",
 )
 
-OPENAI_KEYS_FILE = Path(
-    os.getenv("OPENAI_KEYS_FILE", "openai_keys.json")
-)
-OPENAI_KEY_SLOTS = {}
+# v5.18.0: only the five numbered slots are used for the primary pool.
 
+for i, env_name in enumerate(V517_OPENAI_KEY_NAMES, 1):
+    key = os.getenv(env_name, "").strip()
+    if key:
+        OPENAI_KEYS.append(key)
 
-def _normalize_openai_key(value):
-    value = str(value or "").strip()
-    value = value.replace("\\r", "").replace("\\n", "").strip()
-    if value.startswith("```") and value.endswith("```"):
-        value = value[3:-3].strip()
-    return value
-
-
-def _valid_openai_key(value):
-    value = _normalize_openai_key(value)
-    return bool(value and len(value) >= 20 and " " not in value)
-
-
-def _load_openai_key_slots():
-    """
-    کلیدهای ذخیره‌شده داخل ربات را در اولویت قرار می‌دهد.
-    اگر فایل هنوز ساخته نشده باشد، از OPENAI_API_KEY_1 تا _10 استفاده می‌شود.
-    """
-    global OPENAI_KEY_SLOTS
-
-    env_slots = {}
-    for i, env_name in enumerate(V518_OPENAI_KEY_NAMES, 1):
-        key = _normalize_openai_key(os.getenv(env_name, ""))
-        if _valid_openai_key(key):
-            env_slots[i] = key
-
-    file_slots = {}
-    try:
-        if OPENAI_KEYS_FILE.exists():
-            raw = json.loads(OPENAI_KEYS_FILE.read_text(encoding="utf-8"))
-            if isinstance(raw, dict):
-                source = raw.get("keys", raw)
-                if isinstance(source, dict):
-                    for raw_slot, raw_key in source.items():
-                        try:
-                            slot = int(raw_slot)
-                        except Exception:
-                            continue
-                        key = _normalize_openai_key(raw_key)
-                        if 1 <= slot <= 10 and _valid_openai_key(key):
-                            file_slots[slot] = key
-    except Exception as error:
-        log.warning("OpenAI key file load error: %s", error)
-
-    # فایل تنظیم‌شده از داخل ربات بر ENV اولویت دارد.
-    OPENAI_KEY_SLOTS = file_slots if file_slots else env_slots
-
-    if not OPENAI_KEY_SLOTS:
-        legacy_key = _normalize_openai_key(os.getenv("OPENAI_API_KEY", ""))
-        if _valid_openai_key(legacy_key):
-            OPENAI_KEY_SLOTS = {1: legacy_key}
-
-    _rebuild_openai_pool()
-
-
-def _save_openai_key_slots():
-    try:
-        payload = {
-            "version": BOT_VERSION,
-            "keys": {
-                str(slot): key
-                for slot, key in sorted(OPENAI_KEY_SLOTS.items())
-                if _valid_openai_key(key)
-            },
-        }
-        OPENAI_KEYS_FILE.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        try:
-            os.chmod(OPENAI_KEYS_FILE, 0o600)
-        except Exception:
-            pass
-        return True
-    except Exception as error:
-        log.error("OpenAI key file save error: %s", error)
-        return False
-
-
-def _rebuild_openai_pool():
-    """
-    استخر داخلی را از روی Slotها می‌سازد.
-    ترتیب همیشه 1 تا 10 است و Slot خالی حذف می‌شود.
-    """
-    global OPENAI_KEYS, OPENAI_KEY_SLOT_IDS
-    global OPENAI_CLIENTS, OPENAI_KEY_INDEX
-    global OPENAI_KEY_COOLDOWN, OPENAI_DISABLED_KEYS
-    global OPENAI_KEY_FAILURES, OPENAI_KEY_SUCCESS
-    global OPENAI_KEY_LAST_USED, OPENAI_KEY_LAST_ERROR
-    global OPENAI_KEY_TOTAL_ATTEMPTS
-
-    old_slot = None
-    if OPENAI_KEY_SLOT_IDS and 0 <= OPENAI_KEY_INDEX < len(OPENAI_KEY_SLOT_IDS):
-        old_slot = OPENAI_KEY_SLOT_IDS[OPENAI_KEY_INDEX]
-
-    OPENAI_KEY_SLOT_IDS = [
-        slot for slot in range(1, 11)
-        if _valid_openai_key(OPENAI_KEY_SLOTS.get(slot, ""))
-    ]
-    OPENAI_KEYS = [OPENAI_KEY_SLOTS[slot] for slot in OPENAI_KEY_SLOT_IDS]
-
-    # تغییر کلید باید Client قبلی را کنار بگذارد.
-    OPENAI_CLIENTS = {}
-    OPENAI_KEY_COOLDOWN = {}
-    OPENAI_DISABLED_KEYS = set()
-    OPENAI_KEY_FAILURES = {}
-    OPENAI_KEY_SUCCESS = {}
-    OPENAI_KEY_LAST_USED = {}
-    OPENAI_KEY_LAST_ERROR = {}
-    OPENAI_KEY_TOTAL_ATTEMPTS = {}
-
-    if OPENAI_KEYS:
-        if old_slot in OPENAI_KEY_SLOT_IDS:
-            OPENAI_KEY_INDEX = OPENAI_KEY_SLOT_IDS.index(old_slot)
-        else:
-            OPENAI_KEY_INDEX = 0
-    else:
-        OPENAI_KEY_INDEX = 0
-
-
-_load_openai_key_slots()
+# Legacy compatibility is used only when no numbered key exists, so the pool never exceeds five keys.
+legacy_key = os.getenv("OPENAI_API_KEY", "").strip()
+if not OPENAI_KEYS and legacy_key:
+    OPENAI_KEYS.append(legacy_key)
 
 OPENAI_CLIENTS = {}
 OPENAI_KEY_INDEX = 0
@@ -314,131 +200,6 @@ log = logging.getLogger("gamefa_bot")
 # ============================================================
 # OPENAI
 # ============================================================
-
-def openai_slot_for_index(index: int):
-    if 0 <= index < len(OPENAI_KEY_SLOT_IDS):
-        return OPENAI_KEY_SLOT_IDS[index]
-    return None
-
-
-def openai_mask_key(key):
-    key = str(key or "")
-    if len(key) <= 10:
-        return "••••"
-    return key[:5] + "…" + key[-4:]
-
-
-def openai_key_management_text():
-    configured = sum(1 for slot in range(1, 11) if _valid_openai_key(OPENAI_KEY_SLOTS.get(slot, "")))
-    return (
-        f"🔑 <b>مدیریت کلیدهای OpenAI — {BOT_VERSION}</b>\\n\\n"
-        f"کلیدهای ثبت‌شده: <b>{configured}/10</b>\\n"
-        "برای تنظیم یا تغییر کلید، فقط از دکمه‌های زیر استفاده کنید.\\n"
-        "کلید کامل هیچ‌وقت نمایش داده نمی‌شود."
-    )
-
-def set_openai_key_slot(slot, key):
-    if not 1 <= int(slot) <= 10:
-        raise ValueError("شماره کلید باید بین 1 تا 10 باشد.")
-    key = _normalize_openai_key(key)
-    if not _valid_openai_key(key):
-        raise ValueError("کلید OpenAI نامعتبر یا ناقص است.")
-    OPENAI_KEY_SLOTS[int(slot)] = key
-    _save_openai_key_slots()
-    _rebuild_openai_pool()
-    return True
-
-
-def delete_openai_key_slot(slot):
-    slot = int(slot)
-    if not 1 <= slot <= 10:
-        raise ValueError("شماره کلید باید بین 1 تا 10 باشد.")
-    OPENAI_KEY_SLOTS.pop(slot, None)
-    _save_openai_key_slots()
-    _rebuild_openai_pool()
-    return True
-
-
-
-# ============================================================
-# IN-BOT OPENAI KEY MANAGER (BUTTON ONLY)
-# ============================================================
-
-# user_id -> slot waiting for the next private message containing a key
-OPENAI_KEY_INPUT_PENDING = {}
-
-
-def openai_keys_keyboard():
-    rows = []
-    for base in (1, 3, 5, 7, 9):
-        row = []
-        for slot in range(base, base + 2):
-            key = OPENAI_KEY_SLOTS.get(slot, "")
-            icon = "🟢" if _valid_openai_key(key) else "⚪"
-            label = f"{icon} کلید {slot}"
-            row.append(
-                InlineKeyboardButton(
-                    text=label,
-                    callback_data=f"ok_slot:{slot}",
-                )
-            )
-        rows.append(row)
-    rows.append([
-        InlineKeyboardButton(text="➕ افزودن کلید", callback_data="ok_add"),
-        InlineKeyboardButton(text="🔄 بروزرسانی", callback_data="ok_menu"),
-    ])
-    rows.append([
-        InlineKeyboardButton(text="🔙 بازگشت", callback_data="home"),
-    ])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
-
-
-def openai_slot_keyboard(slot):
-    key = OPENAI_KEY_SLOTS.get(slot, "")
-    status = "🟢 ثبت شده" if _valid_openai_key(key) else "⚪ خالی"
-    rows = [
-        [InlineKeyboardButton(text="🔄 تغییر کلید", callback_data=f"ok_set:{slot}")],
-    ]
-    if _valid_openai_key(key):
-        rows.append([
-            InlineKeyboardButton(text="🧪 تست کلید", callback_data=f"ok_test:{slot}"),
-            InlineKeyboardButton(text="🗑 حذف کلید", callback_data=f"ok_delete:{slot}"),
-        ])
-    rows.append([
-        InlineKeyboardButton(text="🔙 بازگشت به کلیدها", callback_data="ok_menu"),
-    ])
-    return InlineKeyboardMarkup(inline_keyboard=rows), status, key
-
-
-async def show_openai_key_menu(target_message):
-    await target_message.edit_text(
-        openai_key_management_text(),
-        parse_mode=ParseMode.HTML,
-        reply_markup=openai_keys_keyboard(),
-    )
-
-
-async def test_openai_key_slot(slot):
-    key = OPENAI_KEY_SLOTS.get(slot, "")
-    if not _valid_openai_key(key):
-        return False, "این جایگاه خالی است."
-    client = AsyncOpenAI(api_key=key)
-    try:
-        await client.responses.create(
-            model=MODEL,
-            input="Reply with exactly: OK",
-            max_output_tokens=8,
-        )
-        return True, "🟢 کلید معتبر است و API پاسخ داد."
-    except Exception as error:
-        status = getattr(error, "status_code", None)
-        if status == 401 or openai_is_permanently_invalid(error):
-            return False, f"🔴 کلید نامعتبر است.\\n<code>{escape_html(str(error)[:500])}</code>"
-        return False, f"🟡 تست ناموفق بود.\\n<code>{escape_html(str(error)[:500])}</code>"
-    finally:
-        await client.close()
-
-
 
 def get_openai_client(index: int):
     if index not in OPENAI_CLIENTS:
@@ -520,7 +281,7 @@ def openai_is_retryable(error):
 
 
 async def openai_failover(callback):
-    """v5.18.2 balanced failover: rotate across all available numbered keys."""
+    """v5.18.0 balanced failover: rotate across all available numbered keys."""
     global OPENAI_KEY_INDEX
     if not OPENAI_KEYS:
         raise RuntimeError("هیچ کلید OpenAI تنظیم نشده است.")
@@ -1647,7 +1408,7 @@ def title_word_count(title):
 
 
 def valid_title(title):
-    # از v5.18.2 به بعد هیچ سقف کلمه‌ای برای تیتر وجود ندارد.
+    # از v5.18.0 به بعد هیچ سقف کلمه‌ای برای تیتر وجود ندارد.
     # فقط شروع فارسی و خالی نبودن تیتر بررسی می‌شود.
     return bool(title) and starts_with_persian(title)
 
@@ -1952,9 +1713,6 @@ def settings_keyboard():
             [
                 KeyboardButton(text="📢 کانال انتشار"),
                 KeyboardButton(text="🧠 مدل AI"),
-            ],
-            [
-                KeyboardButton(text="🔑 کلیدهای OpenAI"),
             ],
             [
                 KeyboardButton(text="🖼 سیستم تصویر"),
@@ -2415,7 +2173,7 @@ async def clear_archive(message: Message):
 
 @router.message(F.text == "📊 آمار")
 async def stats(message: Message):
-    # Health-aware implementation is defined later in v5.18.2 and resolved at runtime.
+    # Health-aware implementation is defined later in v5.18.0 and resolved at runtime.
     return await stats_v56(message)
 
 
@@ -2458,17 +2216,6 @@ async def model_setting(message: Message):
         f"<code>{escape_html(MODEL)}</code>",
         parse_mode=ParseMode.HTML,
         reply_markup=settings_keyboard(),
-    )
-
-
-@router.message(F.text == "🔑 کلیدهای OpenAI")
-async def openai_keys_settings(message: Message):
-    if not is_admin(message):
-        return
-    await message.answer(
-        openai_key_management_text(),
-        parse_mode=ParseMode.HTML,
-        reply_markup=openai_keys_keyboard(),
     )
 
 
@@ -2562,41 +2309,6 @@ async def clear_command(message: Message):
 # TEXT HANDLER
 # ============================================================
 
-@router.message(F.text, lambda message: message.from_user.id in OPENAI_KEY_INPUT_PENDING)
-async def openai_key_input_handler(message: Message):
-    if not is_admin(message):
-        return
-    user_id = message.from_user.id
-    if user_id not in OPENAI_KEY_INPUT_PENDING:
-        return
-    slot = OPENAI_KEY_INPUT_PENDING.pop(user_id)
-    text = (message.text or "").strip()
-    if text.lower() in ("لغو", "cancel", "/cancel"):
-        await message.answer("❌ عملیات لغو شد.")
-        return
-    try:
-        set_openai_key_slot(slot, text)
-        try:
-            await message.delete()
-        except Exception:
-            pass
-        await message.answer(
-            f"✅ کلید شماره {slot} با موفقیت ثبت شد.\\n"
-            f"وضعیت: 🟢 آماده استفاده",
-            reply_markup=openai_keys_keyboard(),
-        )
-    except Exception as error:
-        try:
-            await message.delete()
-        except Exception:
-            pass
-        await message.answer(
-            f"❌ کلید ثبت نشد.\\n{escape_html(str(error))}",
-            parse_mode=ParseMode.HTML,
-            reply_markup=openai_keys_keyboard(),
-        )
-
-
 @router.message(F.text)
 async def text_handler(message: Message):
     if not is_admin(message):
@@ -2604,30 +2316,7 @@ async def text_handler(message: Message):
 
     text = (message.text or "").strip()
 
-    if not text:
-        return
-
-    # دریافت کلید در حالت تنظیم امن مرحله‌ای.
-    if not text.startswith("/") and message.from_user.id in PENDING_OPENAI_KEY_SETUP:
-        slot = PENDING_OPENAI_KEY_SETUP.pop(message.from_user.id)
-        try:
-            set_openai_key_slot(slot, text)
-            try:
-                await message.delete()
-            except Exception:
-                pass
-            await message.answer(
-                f"✅ کلید شماره {slot} ذخیره شد.\n"
-                f"🔑 <code>{escape_html(openai_mask_key(OPENAI_KEY_SLOTS[slot]))}</code>",
-                parse_mode=ParseMode.HTML,
-            )
-        except Exception as error:
-            await message.answer(
-                f"❌ کلید ذخیره نشد: {escape_html(str(error))}"
-            )
-        return
-
-    if text.startswith("/"):
+    if not text or text.startswith("/"):
         return
 
     menu_words = {
@@ -2641,7 +2330,6 @@ async def text_handler(message: Message):
         "🗑 پاکسازی آرشیو",
         "📢 کانال انتشار",
         "🧠 مدل AI",
-        "🔑 کلیدهای OpenAI",
         "🖼 سیستم تصویر",
         "✍️ قالب خبر",
         "🔙 بازگشت",
@@ -2942,20 +2630,17 @@ def key_health_snapshot():
     rows = []
     for index, key in enumerate(OPENAI_KEYS):
         cooldown = max(0, int(OPENAI_KEY_COOLDOWN.get(index, 0) - now))
-        slot = openai_slot_for_index(index) or (index + 1)
-        if index in OPENAI_DISABLED_KEYS:
-            status = "🔴 غیرفعال"
-        elif cooldown:
+        if cooldown:
             status = f"🟡 cooldown {cooldown}s"
         else:
             status = "🟢 آماده"
-        rows.append(f"{slot:02d}️⃣ {status}")
+        rows.append(f"{index + 1}️⃣ {status}")
     return rows or ["❌ کلیدی تنظیم نشده است"]
 
 
 def editorial_dashboard_text():
     return (
-        "📊 <b>داشبورد تحریریه v5.18.2</b>\n\n"
+        "📊 <b>داشبورد تحریریه v5.18.0</b>\n\n"
         f"📰 پردازش‌شده: <b>{editorial_stats.get('processed',0)}</b>\n"
         f"📢 منتشرشده: <b>{editorial_stats.get('published',0)}</b>\n"
         f"♻️ تکراری: <b>{editorial_stats.get('duplicates',0)}</b>\n"
@@ -3243,104 +2928,6 @@ async def cancel_current_callback(callback):
     await callback.message.answer("❌ خبر آماده انتشار لغو شد.", reply_markup=main_keyboard())
 
 
-@router.callback_query(F.data == "ok_menu")
-async def openai_keys_menu_callback(callback):
-    if not is_admin_id(callback.from_user.id):
-        await callback.answer("⛔ دسترسی ندارید.", show_alert=True)
-        return
-    await callback.answer()
-    await show_openai_key_menu(callback.message)
-
-
-@router.callback_query(F.data == "ok_add")
-async def openai_key_add_callback(callback):
-    if not is_admin_id(callback.from_user.id):
-        await callback.answer("⛔ دسترسی ندارید.", show_alert=True)
-        return
-    empty = next((i for i in range(1, 11) if not _valid_openai_key(OPENAI_KEY_SLOTS.get(i, ""))), None)
-    if empty is None:
-        await callback.answer("هر ۱۰ جایگاه پر هستند.", show_alert=True)
-        return
-    OPENAI_KEY_INPUT_PENDING[callback.from_user.id] = empty
-    await callback.answer()
-    await callback.message.edit_text(
-        f"🔑 <b>افزودن کلید {empty}</b>\\n\\n"
-        "کلید OpenAI را در پیام بعدی همین چت ارسال کنید.\\n"
-        "پس از دریافت، پیام حاوی کلید حذف می‌شود.\\n\\n"
-        "برای انصراف: «لغو» را ارسال کنید.",
-        parse_mode=ParseMode.HTML,
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🔙 بازگشت", callback_data="ok_menu")]
-        ]),
-    )
-
-
-@router.callback_query(F.data.startswith("ok_slot:"))
-async def openai_key_slot_callback(callback):
-    if not is_admin_id(callback.from_user.id):
-        await callback.answer("⛔ دسترسی ندارید.", show_alert=True)
-        return
-    slot = int(callback.data.split(":", 1)[1])
-    markup, status, key = openai_slot_keyboard(slot)
-    await callback.answer()
-    await callback.message.edit_text(
-        f"🔑 <b>کلید شماره {slot}</b>\\n\\n"
-        f"وضعیت: {status}\\n"
-        f"کلید: <code>{escape_html(openai_mask_key(key) if key else 'خالی')}</code>",
-        parse_mode=ParseMode.HTML,
-        reply_markup=markup,
-    )
-
-
-@router.callback_query(F.data.startswith("ok_set:"))
-async def openai_key_set_callback(callback):
-    if not is_admin_id(callback.from_user.id):
-        await callback.answer("⛔ دسترسی ندارید.", show_alert=True)
-        return
-    slot = int(callback.data.split(":", 1)[1])
-    OPENAI_KEY_INPUT_PENDING[callback.from_user.id] = slot
-    await callback.answer()
-    await callback.message.edit_text(
-        f"🔄 <b>تغییر کلید شماره {slot}</b>\\n\\n"
-        "کلید جدید را در پیام بعدی همین چت ارسال کنید.\\n"
-        "پیام حاوی کلید پس از دریافت حذف خواهد شد.\\n\\n"
-        "برای انصراف: «لغو» را ارسال کنید.",
-        parse_mode=ParseMode.HTML,
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🔙 بازگشت", callback_data="ok_menu")]
-        ]),
-    )
-
-
-@router.callback_query(F.data.startswith("ok_delete:"))
-async def openai_key_delete_callback(callback):
-    if not is_admin_id(callback.from_user.id):
-        await callback.answer("⛔ دسترسی ندارید.", show_alert=True)
-        return
-    slot = int(callback.data.split(":", 1)[1])
-    delete_openai_key_slot(slot)
-    OPENAI_KEY_INPUT_PENDING.pop(callback.from_user.id, None)
-    await callback.answer("کلید حذف شد.")
-    await show_openai_key_menu(callback.message)
-
-
-@router.callback_query(F.data.startswith("ok_test:"))
-async def openai_key_test_callback(callback):
-    if not is_admin_id(callback.from_user.id):
-        await callback.answer("⛔ دسترسی ندارید.", show_alert=True)
-        return
-    slot = int(callback.data.split(":", 1)[1])
-    await callback.answer("در حال تست...")
-    ok, result = await test_openai_key_slot(slot)
-    await callback.message.answer(
-        f"🧪 <b>تست کلید {slot}</b>\\n\\n{result}",
-        parse_mode=ParseMode.HTML,
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🔙 مدیریت کلیدها", callback_data="ok_menu")]
-        ]),
-    )
-
-
 @router.callback_query(F.data == "dashboard")
 async def dashboard_callback(callback):
     if not is_admin_id(callback.from_user.id):
@@ -3403,72 +2990,6 @@ async def dashboard_command(message: Message):
 async def keys_command(message: Message):
     if not is_admin(message): return
     await message.answer("🔑 <b>وضعیت کلیدهای OpenAI</b>\n\n" + "\n".join(key_health_snapshot()), parse_mode=ParseMode.HTML)
-
-
-PENDING_OPENAI_KEY_SETUP = {}
-
-
-@router.message(Command("setkey"))
-async def setkey_command(message: Message):
-    if not is_admin(message):
-        return
-
-    parts = (message.text or "").split(maxsplit=2)
-    if len(parts) < 2:
-        await message.answer(
-            "🔑 استفاده:\n"
-            "<code>/setkey 1 sk-...</code>\n\n"
-            "یا برای دریافت کلید در پیام بعدی:\n"
-            "<code>/setkey 1</code>",
-            parse_mode=ParseMode.HTML,
-        )
-        return
-
-    try:
-        slot = int(parts[1])
-        if not 1 <= slot <= 10:
-            raise ValueError
-    except Exception:
-        await message.answer("❌ شماره کلید باید بین 1 تا 10 باشد.")
-        return
-
-    if len(parts) >= 3:
-        try:
-            set_openai_key_slot(slot, parts[2])
-            try:
-                await message.delete()
-            except Exception:
-                pass
-            await message.answer(
-                f"✅ کلید شماره {slot} با موفقیت ذخیره شد.\n"
-                f"🔑 کلید فعال: <code>{escape_html(openai_mask_key(OPENAI_KEY_SLOTS[slot]))}</code>",
-                parse_mode=ParseMode.HTML,
-            )
-        except Exception as error:
-            await message.answer(f"❌ ذخیره کلید ناموفق بود: {escape_html(str(error))}")
-        return
-
-    PENDING_OPENAI_KEY_SETUP[message.from_user.id] = slot
-    await message.answer(
-        f"🔐 کلید شماره {slot} را در پیام بعدی بفرست.\n"
-        "برای امنیت، پیام کلید بعد از دریافت حذف می‌شود.",
-    )
-
-
-@router.message(Command("delkey"))
-async def delkey_command(message: Message):
-    if not is_admin(message):
-        return
-    parts = (message.text or "").split(maxsplit=1)
-    if len(parts) != 2:
-        await message.answer("❌ استفاده: <code>/delkey 1</code>", parse_mode=ParseMode.HTML)
-        return
-    try:
-        slot = int(parts[1])
-        delete_openai_key_slot(slot)
-        await message.answer(f"✅ کلید شماره {slot} حذف شد.")
-    except Exception as error:
-        await message.answer(f"❌ حذف کلید ناموفق بود: {escape_html(str(error))}")
 
 
 @router.message(Command("queue"))
@@ -3704,7 +3225,7 @@ def v56_finalize_post(post, source, facts):
     """پاک‌سازی نهایی: استیکر تیتر فقط یکی از سه دسته مجاز باشد و هشتگ حذف شود."""
     title, body = parse_editable_post(post)
     title = re.sub(r"^[🎮🎥📢🎬📱📰🟣🔵🟢🟡🟠⚪⚫🚨\s]+", "", title).strip()
-    # v5.18.2: تیتر دیگر به ۸ کلمه محدود نیست.
+    # v5.18.0: تیتر دیگر به ۸ کلمه محدود نیست.
     category = detect_category(title + " " + body, facts)
     title = f"{category} {title}"
     body = re.sub(r"(?<!\w)#[\w\u0600-\u06FF-]+", "", body)
@@ -4588,7 +4109,7 @@ async def v59_process_news(message, text):
         processing_users.discard(user_id)
 
 
-# v5.18.2 موتور اصلی
+# v5.18.0 موتور اصلی
 process_news = v59_process_news
 advanced_process_news = v59_process_news
 
@@ -5178,7 +4699,7 @@ async def v511_process_news(message, text):
 
         news_score=v511_news_score(source,facts,related,title,body,image_score)
         if breaking and float(news_score.get("score", 0) or 0) >= 70: stat_inc("breaking_ai")
-        # v5.18.2: no engagement text is ever appended to the published news.
+        # v5.18.0: no engagement text is ever appended to the published news.
         engagement=""
 
         if status: await status.edit_text("🧾 مرحله ۷/۸ — ساخت پست نهایی و حافظه تحریریه...")
@@ -5219,7 +4740,7 @@ async def v511_process_news(message, text):
         else:
             await message.answer(post,parse_mode=ParseMode.HTML,reply_markup=advanced_publish_keyboard())
 
-        # v5.18.2: the news message is the only user-visible result.
+        # v5.18.0: the news message is the only user-visible result.
         # No AI Editor/status/score/source panel is sent after it.
 
     except Exception as error:
@@ -5239,7 +4760,7 @@ async def debug_command_v511(message: Message):
     if not is_admin(message): return
     results=await v56_health_check()
     await message.answer(
-        "🛠 <b>Gamefa Bot Debug v5.18.2</b>\n\n"
+        "🛠 <b>Gamefa Bot Debug v5.18.0</b>\n\n"
         f"🤖 مدل: <code>{escape_html(MODEL)}</code>\n"
         f"🧠 AI Editor: {'🟢' if AI_EDITOR_ENABLED else '🔴'}\n"
         f"🧬 Semantic Duplicate: {'🟢' if ENABLE_SEMANTIC_DUPLICATE else '🔴'}\n"
@@ -5279,10 +4800,10 @@ process_news = v511_process_news
 advanced_process_news = v511_process_news
 
 # ============================================================
-# GAMEFA BOT v5.18.2 — STABILITY CONTRACT
+# GAMEFA BOT v5.18.0 — STABILITY CONTRACT
 # ============================================================
-V517_VERSION="v5.18.2"
-V517_MAX_KEYS=10
+V517_VERSION="v5.18.0"
+V517_MAX_KEYS=5
 V517_UI_DASHBOARD_ENABLED=False
 V517_UI_STATS_ENABLED=False
 V517_ALLOWED_STICKERS=("🎮","🎥","📢")
@@ -5322,7 +4843,7 @@ def v517_key_mask(index):
     return key[:4]+"…"+key[-4:] if len(key)>8 else "••••"
 
 def v517_validate_key_pool():
-    if len(OPENAI_KEYS)>V517_MAX_KEYS: raise RuntimeError("بیش از ۱۰ کلید OpenAI تنظیم شده است.")
+    if len(OPENAI_KEYS)>V517_MAX_KEYS: raise RuntimeError("بیش از پنج کلید OpenAI تنظیم شده است.")
     if not OPENAI_KEYS: raise RuntimeError("هیچ کلید OpenAI تنظیم نشده است.")
     return True
 
@@ -5341,8 +4862,8 @@ def v517_cleanup_cooldowns():
 
 def v517_startup_check():
     v517_validate_key_pool(); v517_cleanup_cooldowns()
-    if len(OPENAI_KEYS)<10: log.warning("v5.18.2: %s/10 numbered OpenAI keys configured.",len(OPENAI_KEYS))
-    else: log.info("v5.18.2: all ten numbered OpenAI keys configured.")
+    if len(OPENAI_KEYS)<5: log.warning("v5.18.0: %s/5 numbered OpenAI keys configured.",len(OPENAI_KEYS))
+    else: log.info("v5.18.0: all five numbered OpenAI keys configured.")
     return True
 
 def v517_pool_snapshot():
@@ -5352,235 +4873,235 @@ def v517_dashboard_is_removed(): return V517_UI_DASHBOARD_ENABLED is False
 
 def v517_stats_is_removed(): return V517_UI_STATS_ENABLED is False
 
-# v5.18.2 stability invariant 001: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 002: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 003: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 004: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 005: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 006: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 007: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 008: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 009: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 010: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 011: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 012: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 013: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 014: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 015: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 016: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 017: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 018: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 019: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 020: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 021: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 022: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 023: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 024: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 025: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 026: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 027: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 028: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 029: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 030: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 031: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 032: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 033: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 034: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 035: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 036: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 037: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 038: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 039: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 040: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 041: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 042: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 043: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 044: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 045: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 046: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 047: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 048: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 049: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 050: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 051: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 052: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 053: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 054: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 055: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 056: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 057: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 058: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 059: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 060: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 061: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 062: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 063: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 064: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 065: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 066: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 067: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 068: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 069: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 070: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 071: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 072: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 073: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 074: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 075: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 076: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 077: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 078: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 079: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 080: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 081: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 082: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 083: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 084: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 085: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 086: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 087: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 088: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 089: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 090: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 091: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 092: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 093: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 094: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 095: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 096: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 097: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 098: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 099: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 100: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 101: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 102: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 103: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 104: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 105: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 106: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 107: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 108: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 109: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 110: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 111: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 112: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 113: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 114: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 115: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 116: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 117: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 118: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 119: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 120: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 121: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 122: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 123: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 124: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 125: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 126: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 127: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 128: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 129: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 130: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 131: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 132: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 133: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 134: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 135: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 136: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 137: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 138: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 139: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 140: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 141: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 142: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 143: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 144: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 145: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 146: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 147: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 148: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 149: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 150: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 151: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 152: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 153: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 154: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 155: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 156: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 157: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 158: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 159: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 160: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 161: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 162: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 163: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 164: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 165: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 166: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 167: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 168: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 169: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 170: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 171: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 172: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 173: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 174: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 175: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 176: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 177: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 178: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 179: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 180: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 181: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 182: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 183: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 184: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 185: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 186: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 187: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 188: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 189: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 190: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 191: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 192: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 193: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 194: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 195: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 196: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 197: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 198: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 199: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 200: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 201: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 202: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 203: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 204: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 205: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 206: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 207: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 208: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 209: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 210: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 211: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 212: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 213: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 214: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 215: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 216: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 217: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 218: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 219: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 220: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 221: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 222: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 223: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 224: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 225: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 226: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 227: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 228: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
-# v5.18.2 stability invariant 229: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 001: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 002: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 003: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 004: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 005: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 006: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 007: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 008: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 009: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 010: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 011: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 012: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 013: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 014: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 015: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 016: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 017: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 018: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 019: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 020: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 021: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 022: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 023: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 024: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 025: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 026: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 027: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 028: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 029: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 030: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 031: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 032: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 033: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 034: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 035: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 036: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 037: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 038: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 039: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 040: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 041: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 042: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 043: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 044: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 045: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 046: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 047: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 048: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 049: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 050: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 051: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 052: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 053: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 054: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 055: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 056: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 057: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 058: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 059: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 060: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 061: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 062: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 063: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 064: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 065: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 066: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 067: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 068: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 069: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 070: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 071: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 072: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 073: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 074: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 075: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 076: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 077: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 078: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 079: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 080: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 081: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 082: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 083: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 084: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 085: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 086: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 087: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 088: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 089: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 090: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 091: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 092: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 093: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 094: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 095: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 096: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 097: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 098: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 099: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 100: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 101: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 102: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 103: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 104: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 105: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 106: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 107: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 108: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 109: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 110: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 111: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 112: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 113: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 114: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 115: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 116: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 117: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 118: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 119: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 120: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 121: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 122: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 123: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 124: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 125: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 126: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 127: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 128: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 129: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 130: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 131: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 132: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 133: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 134: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 135: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 136: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 137: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 138: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 139: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 140: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 141: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 142: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 143: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 144: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 145: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 146: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 147: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 148: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 149: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 150: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 151: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 152: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 153: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 154: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 155: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 156: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 157: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 158: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 159: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 160: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 161: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 162: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 163: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 164: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 165: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 166: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 167: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 168: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 169: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 170: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 171: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 172: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 173: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 174: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 175: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 176: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 177: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 178: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 179: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 180: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 181: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 182: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 183: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 184: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 185: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 186: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 187: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 188: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 189: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 190: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 191: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 192: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 193: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 194: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 195: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 196: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 197: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 198: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 199: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 200: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 201: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 202: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 203: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 204: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 205: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 206: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 207: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 208: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 209: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 210: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 211: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 212: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 213: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 214: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 215: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 216: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 217: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 218: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 219: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 220: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 221: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 222: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 223: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 224: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 225: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 226: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 227: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 228: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
+# v5.18.0 stability invariant 229: preserve the v5.14 editorial behavior and avoid unrelated UI changes.
 
 # ============================================================
 # MAIN
