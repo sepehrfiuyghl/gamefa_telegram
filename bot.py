@@ -2791,7 +2791,7 @@ def v519_target_line_count(source=None, facts=None):
         str(facts.get("summary", "")), str(facts.get("key_details", "")),
         " ".join(map(str, facts.get("details", []) or [])),
     ])
-    return 8 if len(re.findall(r"\S+", raw)) >= 110 else 5
+    return 8 if len(re.findall(r"\S+", raw)) >= 50 else 5
 
 
 def v519_sentence_chunks(text):
@@ -2806,89 +2806,94 @@ def v519_sentence_chunks(text):
 
 
 def v519_rechunk(text, target):
-    """تقسیم قطعی متن به ۵ خط یا ۸ خط، بدون شکستن مرز بندها.
-    در حالت ۸ خط، مرز دو بند همیشه روی پایان یک جمله قرار می‌گیرد.
+    """فرمت نهایی بدنه v5.19.6.
+
+    نکته مهم: «خط» در تلگرام به عرض فونت و دستگاه کاربر وابسته است؛ بنابراین
+    نباید داخل متن، خط‌شکست مصنوعی ایجاد کنیم. حالت ۵ خط یعنی یک پاراگراف
+    کوتاه و حالت ۸ خط یعنی دو پاراگراف متعادل. هر پاراگراف باید با جمله کامل
+    تمام شود و هیچ جمله‌ای بین دو پاراگراف نصف نمی‌شود.
     """
     text = clean_text(text or "")
-    words = re.findall(r"\S+", text)
-    if not words or target not in (5, 8):
+    if not text or target not in (5, 8):
         return []
 
-    def line_chunks(segment_words, count):
-        if len(segment_words) < count:
-            return []
-        base, extra = divmod(len(segment_words), count)
-        chunks=[]; pos=0
-        for i in range(count):
-            take = base + (1 if i < extra else 0)
-            chunk = " ".join(segment_words[pos:pos+take]).strip()
-            if not chunk:
-                return []
-            chunks.append(chunk)
-            pos += take
-        return chunks
-
-    if target == 5:
-        lines = line_chunks(words, 5)
-        if not lines:
-            return []
-        # پایان بدنه باید یک جمله کامل باشد.
-        if lines[-1][-1] not in ".!?؟؛…":
-            lines[-1] += "."
-        return lines
-
-    # ۸ خط: ابتدا جمله‌ها را جدا می‌کنیم تا بند اول با نقطه/علامت پایان تمام شود.
+    # نرمال‌سازی خط‌شکست‌های تولیدشده توسط مدل به فاصله.
+    text = re.sub(r"\s+", " ", text).strip()
     sentences = [x.strip() for x in re.split(r"(?<=[.!؟])\s+", text) if x.strip()]
-    if len(sentences) < 2:
-        # اگر متن یک جمله بسیار بلند بود، تقسیم اجباری انجام می‌شود؛
-        # اما نقطه پایان را در انتهای بند اول اضافه می‌کنیم.
-        mid = max(1, len(words)//2)
-        first_words, second_words = words[:mid], words[mid:]
-    else:
-        total = len(words); acc=0; boundary=1; best=None
-        for i, sentence in enumerate(sentences[:-1], 1):
-            acc += len(re.findall(r"\S+", sentence))
-            if abs(acc - total/2) < abs((best[0] if best else total) - total/2):
-                best=(acc,i)
-        boundary = best[1] if best else max(1, len(sentences)//2)
-        first_text=" ".join(sentences[:boundary]).strip()
-        second_text=" ".join(sentences[boundary:]).strip()
-        first_words=re.findall(r"\S+", first_text)
-        second_words=re.findall(r"\S+", second_text)
-
-    # برای ۴ خط در هر بند، هر بند باید حداقل ۴ کلمه داشته باشد.
-    if len(first_words) < 4 or len(second_words) < 4:
-        mid=max(4,min(len(words)-4,len(words)//2))
-        first_words,second_words=words[:mid],words[mid:]
-
-    first_lines=line_chunks(first_words,4)
-    second_lines=line_chunks(second_words,4)
-    if not first_lines or not second_lines:
+    if not sentences:
         return []
-    if first_lines[-1][-1] not in ".!?؟؛…":
-        first_lines[-1] += "."
-    if second_lines[-1][-1] not in ".!?؟؛…":
-        second_lines[-1] += "."
-    return first_lines + ["\n"] + second_lines
+
+    def finish(sentence):
+        sentence = sentence.strip()
+        if sentence and sentence[-1] not in ".!?؟…":
+            sentence += "."
+        return sentence
+
+    # حالت کوتاه: یک بند کامل.
+    if target == 5:
+        return [finish(" ".join(sentences))]
+
+    # حالت مفصل: دو بند؛ مرز فقط بین دو جمله قرار می‌گیرد.
+    if len(sentences) < 2:
+        # متن یک جمله‌ای را نمی‌توان به شکل طبیعی به دو بند تقسیم کرد؛
+        # بنابراین به‌جای شکستن جمله، آن را یک بند کامل نگه می‌داریم.
+        return [finish(" ".join(sentences))]
+
+    weights = [len(re.findall(r"\S+", x)) for x in sentences]
+    total = sum(weights)
+    acc = 0
+    boundary = 1
+    best_distance = None
+    for i, w in enumerate(weights[:-1], 1):
+        acc += w
+        distance = abs(acc - total / 2)
+        if best_distance is None or distance < best_distance:
+            best_distance = distance
+            boundary = i
+
+    p1 = finish(" ".join(sentences[:boundary]))
+    p2 = finish(" ".join(sentences[boundary:]))
+    if not p1 or not p2:
+        return []
+    return [p1, "\n", p2]
+
 
 def v519_format_body(body, source=None, facts=None):
-    target=v519_target_line_count(source,facts)
-    chunks=v519_rechunk(body,target)
-    if not chunks: return ""
-    if target==8:
-        if len(chunks)!=9 or chunks[4] != "\n": return ""
-        return "\n".join(chunks[:4])+"\n\n"+"\n".join(chunks[5:])
-    if len(chunks)!=5: return ""
-    return "\n".join(chunks)
+    target = v519_target_line_count(source, facts)
+    chunks = v519_rechunk(body, target)
+    if not chunks:
+        return ""
+    if target == 8 and len(chunks) == 3 and chunks[1] == "\n":
+        return chunks[0] + "\n\n" + chunks[2]
+    if target == 5 and len(chunks) == 1:
+        return chunks[0]
+    # اگر متن برای حالت ۸ خطی فقط یک جمله داشت، آن را به حالت یک‌بندی تبدیل
+    # می‌کنیم تا هیچ جمله‌ای مصنوعی نصف نشود.
+    if target == 8 and len(chunks) == 1:
+        return chunks[0]
+    return ""
 
 
 def v519_validate_layout(body, source=None, facts=None):
-    target=v519_target_line_count(source,facts)
-    paragraphs=[p for p in re.split(r"\n\s*\n",body.strip()) if p.strip()]
-    lines=[x.strip() for x in body.splitlines() if x.strip()]
-    if target==8:
-        return len(lines)==8 and len(paragraphs)==2 and all(len([x for x in p.splitlines() if x.strip()])==4 for p in paragraphs)
-    return len(lines)==5 and len(paragraphs)==1
+    """اعتبارسنجی بر اساس بندها، نه line wrapping تلگرام."""
+    body = (body or "").strip()
+    paragraphs = [p.strip() for p in re.split(r"\n\s*\n", body) if p.strip()]
+    target = v519_target_line_count(source, facts)
+
+    # هیچ خط‌شکست تکی نباید داخل پاراگراف وجود داشته باشد.
+    if any("\n" in p for p in paragraphs):
+        return False
+
+    def complete(p):
+        return bool(p) and p[-1] in ".!?؟…"
+
+    if target == 5:
+        return len(paragraphs) == 1 and complete(paragraphs[0])
+
+    if target == 8:
+        return len(paragraphs) == 2 and all(complete(p) for p in paragraphs)
+
+    return False
 
 
 def build_custom_post(title, body, source=None, facts=None):
@@ -2900,7 +2905,10 @@ def build_custom_post(title, body, source=None, facts=None):
     body = re.sub(r"(?<!\w)#[\w\u0600-\u06FF-]+", "", body).strip()
     if not title or not body:
         return ""
-    category = detect_category(title + " " + body, facts)
+    category = detect_category(
+        title + " " + body + " " + str((source or {}).get("title", "")) + " " + str((source or {}).get("body", "")),
+        facts,
+    )
     # تیتر فقط با یکی از سه استیکر دسته‌بندی آغاز می‌شود؛
     # Breaking هرگز استیکر ابتدای تیتر را تغییر نمی‌دهد.
     return (
@@ -3574,7 +3582,10 @@ def v56_finalize_post(post, source, facts):
     """پاک‌سازی نهایی v5.19: تیتر با یکی از سه دسته و بدنه فقط ۵ یا ۸ خط."""
     title, body = parse_editable_post(post)
     title = re.sub(r"^[🎮🎥📢🎬📱📰🔻🔵🟢🟡🟠⚪⚫🚨\s]+", "", title).strip()
-    category = detect_category(title + " " + body, facts)
+    category = detect_category(
+        title + " " + body + " " + str((source or {}).get("title", "")) + " " + str((source or {}).get("body", "")),
+        facts,
+    )
     title = f"{category} {title}"
     body = re.sub(r"(?<!\w)#[\w\u0600-\u06FF-]+", "", body)
     body = v519_format_body(body, source, facts)
@@ -4911,19 +4922,17 @@ async def v512_fact_check(source, facts, title, body, related):
 def v512_strict_validate(title, body, source, facts, fact_check=None):
     issues=[]
     if not title or not starts_with_persian(title): issues.append("تیتر نامعتبر")
-    lines=[x.strip() for x in body.splitlines() if x.strip()]
-    paragraphs=[p for p in re.split(r"\n\s*\n", body.strip()) if p.strip()]
-    valid_layout=(len(lines)==5 and len(paragraphs)==1) or (len(lines)==8 and len(paragraphs)==2 and all(len([x for x in p.splitlines() if x.strip()])==4 for p in paragraphs))
-    if not valid_layout: issues.append("قالب بدنه باید ۵ خط یا ۲ بند ۴ خطی باشد")
-    # v5.19.6 FIX: در قالب ۵/۸ خط، «واحد خبری» همان خط است؛
-    # نباید تعداد جمله‌ها را با تعداد خطوط مقایسه کنیم. بسیاری از خطوط
-    # عمداً با نقطه تمام نمی‌شوند و این باعث خطای کاذب v5.19.6 می‌شد.
-    units=[x.strip() for x in body.splitlines() if x.strip()]
-    if len(units) not in (5, 8): issues.append("تعداد خطوط خبری نامعتبر")
-    if len(units)==8:
-        p_units=[p for p in re.split(r"\n\s*\n", body.strip()) if p.strip()]
-        if len(p_units)!=2 or any(len([x for x in p.splitlines() if x.strip()])!=4 for p in p_units):
-            issues.append("چیدمان ۸ خطی نامعتبر")
+    paragraphs=[p.strip() for p in re.split(r"\n\s*\n", body.strip()) if p.strip()]
+    target=v519_target_line_count(source, facts)
+    valid_layout=v519_validate_layout(body, source, facts)
+    if not valid_layout:
+        if target==8:
+            issues.append("قالب بدنه باید ۲ بند کامل باشد؛ هر بند در نمایش تلگرام حدود ۴ خط می‌شود")
+        else:
+            issues.append("قالب بدنه باید یک بند کامل و کوتاه باشد")
+    # خط‌شکست تکی داخل بند ممنوع است؛ شکست خطوط توسط خود تلگرام انجام می‌شود.
+    if any("\n" in p for p in paragraphs):
+        issues.append("خط‌شکست مصنوعی داخل بند وجود دارد")
     # خطوط بدنه ممکن است با نام انگلیسی بازی/شرکت شروع شوند؛ فقط ساختار کلی بدنه را اعتبارسنجی می‌کنیم.
     banned=["نظر شما", "نظر شما چیست", "به نظر شما", "لایک", "کامنت", "بیشتر بخوانید", "منبع:", "منابع:", "ai editor", "gamefa ai", "امتیاز سردبیر", "امتیاز جذابیت"]
     combined=norm(title+" "+body)
