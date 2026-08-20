@@ -51,7 +51,7 @@ from openai import AsyncOpenAI
 # - Railway friendly
 # ============================================================
 
-BOT_VERSION = "v5.19.5"
+BOT_VERSION = "v5.19.6"
 # v5.19.2: تیتر بدون محدودیت تعداد کلمه
 # طول تیتر فقط با دقت، روانی و ارتباط با خبر کنترل می‌شود.
 HEADLINE_WORD_LIMIT = None
@@ -2770,57 +2770,78 @@ def v519_target_line_count(source=None, facts=None):
     return 8
 
 
+V519_MAX_LINE_CHARS = int(os.getenv("V519_MAX_LINE_CHARS", "54"))
+V519_MAX_BODY_CHARS = V519_MAX_LINE_CHARS * 8
+
 def v519_rechunk(text, target=8):
-    """متن را دقیقاً به ۸ خط متعادل تقسیم می‌کند؛ هر خط فقط بین کلمات شکسته می‌شود."""
+    """خروجی نهایی را به ۸ خط واقعیِ کوتاه تبدیل می‌کند: ۲ بند × ۴ خط.
+    هیچ کلمه‌ای نصف نمی‌شود و طول هر خط محدود است تا تلگرام آن را به خط‌های
+    بصری اضافه تبدیل نکند. این تابع مستقل از Enterهای خروجی مدل است."""
     text = clean_text(text or "")
+    text = re.sub(r"[#*_`]+", "", text)
+    text = re.sub(r"🔻", " ", text)
+    text = re.sub(r"🆔\s*@Gamefa_official", " ", text, flags=re.I)
     text = re.sub(r"\s+", " ", text).strip()
     words = re.findall(r"\S+", text)
-    if not words or target != 8 or len(words) < target:
+    if target != 8 or len(words) < 8:
         return []
 
-    # هدف: ۸ خط با طول تقریباً برابر، بدون شکستن هیچ کلمه.
-    total_chars = len(text)
-    ideal = max(48, total_chars / target)
-    lines = []
-    current = []
-    current_len = 0
+    # اگر مدل بیش از ظرفیت ۸ خط نوشته، متن را در مرز کلمه کوتاه می‌کنیم؛
+    # هرگز وسط کلمه یا عدد/نام شکسته نمی‌شود.
+    kept=[]
+    used=0
+    for w in words:
+        extra=len(w)+(1 if kept else 0)
+        if used+extra > V519_MAX_BODY_CHARS:
+            break
+        kept.append(w)
+        used += extra
+    if len(kept) < 8:
+        return []
+    words=kept
 
-    for idx, word in enumerate(words):
-        remaining_words = len(words) - idx
-        remaining_lines = target - len(lines)
-        if remaining_lines <= 1:
-            current.append(word)
-            continue
-
-        proposed = current_len + (1 if current else 0) + len(word)
-        # خط را نزدیک به طول هدف می‌بندیم؛ در عین حال حداقل یک کلمه برای هر خط باقی می‌گذاریم.
-        if current and proposed > ideal and remaining_words >= remaining_lines:
-            lines.append(" ".join(current))
-            current = [word]
-            current_len = len(word)
+    # ابتدا متن را با حداکثر طول خط می‌شکنیم.
+    raw_lines=[]
+    cur=[]
+    cur_len=0
+    for w in words:
+        proposed=cur_len+(1 if cur else 0)+len(w)
+        if cur and proposed > V519_MAX_LINE_CHARS:
+            raw_lines.append(" ".join(cur))
+            cur=[w]; cur_len=len(w)
         else:
-            current.append(word)
-            current_len = proposed
+            cur.append(w); cur_len=proposed
+    if cur: raw_lines.append(" ".join(cur))
 
-    if current:
-        lines.append(" ".join(current))
+    # دقیقاً ۸ خط: اگر کم است، بلندترین خط را فقط در مرز کلمه تقسیم می‌کنیم؛
+    # اگر زیاد است، خطوط مجاور را تا سقف طول ادغام می‌کنیم.
+    while len(raw_lines) < target:
+        candidates=[i for i,x in enumerate(raw_lines) if len(x.split()) >= 2]
+        if not candidates: return []
+        i=max(candidates, key=lambda j: len(raw_lines[j]))
+        ws=raw_lines[i].split()
+        best=None; bestdiff=10**9
+        for cut in range(1,len(ws)):
+            a=" ".join(ws[:cut]); b=" ".join(ws[cut:])
+            if len(a)<=V519_MAX_LINE_CHARS and len(b)<=V519_MAX_LINE_CHARS:
+                diff=abs(len(a)-len(b))
+                if diff<bestdiff: best=(a,b); bestdiff=diff
+        if best is None: return []
+        raw_lines[i:i+1]=list(best)
 
-    # اگر به‌دلیل طول کلمات/متن کمتر یا بیشتر از ۸ خط شد، با کمینه‌سازی اختلاف طول‌ها اصلاح می‌کنیم.
-    while len(lines) > target:
-        # کوتاه‌ترین خط را با خط بعدی ادغام کن.
-        i = min(range(len(lines) - 1), key=lambda j: len(lines[j]) + len(lines[j + 1]))
-        lines[i:i + 2] = [lines[i] + " " + lines[i + 1]]
+    while len(raw_lines) > target:
+        candidates=[]
+        for i in range(len(raw_lines)-1):
+            merged=raw_lines[i]+" "+raw_lines[i+1]
+            if len(merged)<=V519_MAX_LINE_CHARS:
+                candidates.append((abs(len(raw_lines[i])-len(raw_lines[i+1])),i,merged))
+        if not candidates: return []
+        _,i,merged=min(candidates)
+        raw_lines[i:i+2]=[merged]
 
-    while len(lines) < target:
-        # بلندترین خط را در نزدیک‌ترین نقطه به نصف تقسیم کن.
-        i = max(range(len(lines)), key=len)
-        w = lines[i].split()
-        if len(w) < 2:
-            return []
-        cut = max(1, len(w) // 2)
-        lines[i:i + 1] = [" ".join(w[:cut]), " ".join(w[cut:])]
-
-    return [x.strip() for x in lines if x.strip()]
+    if len(raw_lines)!=8 or any(not x or len(x)>V519_MAX_LINE_CHARS for x in raw_lines):
+        return []
+    return raw_lines
 
 
 def v519_format_body(body, source=None, facts=None):
@@ -2834,13 +2855,19 @@ def v519_validate_layout(body, source=None, facts=None):
     paragraphs = [p for p in re.split(r"\n\s*\n", body.strip()) if p.strip()]
     if len(paragraphs) != 2:
         return False
-    return all(len([x for x in p.splitlines() if x.strip()]) == 4 for p in paragraphs)
+    for p in paragraphs:
+        lines=[x.strip() for x in p.splitlines() if x.strip()]
+        if len(lines)!=4: return False
+        if any(len(x)>V519_MAX_LINE_CHARS for x in lines): return False
+    return True
 
 
 def build_custom_post(title, body, source=None, facts=None):
     title = ensure_persian_start(strip_site_branding_from_title(clean_sentence(title)), True)
     body = clean_text(body)
     body = v519_format_body(body, source, facts)
+    if not body or not v519_validate_layout(body, source, facts):
+        return ""
     # حذف هشتگ‌های احتمالی تولیدشده توسط AI یا ورودی ادمین.
     title = re.sub(r"(?<!\w)#[\w\u0600-\u06FF-]+", "", title).strip()
     body = re.sub(r"(?<!\w)#[\w\u0600-\u06FF-]+", "", body).strip()
@@ -2849,9 +2876,13 @@ def build_custom_post(title, body, source=None, facts=None):
     category = detect_category(title + " " + body, facts)
     # تیتر فقط با یکی از سه استیکر دسته‌بندی آغاز می‌شود؛
     # Breaking هرگز استیکر ابتدای تیتر را تغییر نمی‌دهد.
+    body_parts = [p.strip() for p in body.split("\n\n") if p.strip()]
+    if len(body_parts) != 2:
+        return ""
+    formatted_body = "🔻 " + escape_html(body_parts[0]) + "\n\n🔻 " + escape_html(body_parts[1])
     return (
         "<b>" + escape_html(category + " " + title) + "</b>\n\n"
-        + "🔻 " + escape_html(body)
+        + formatted_body
         + "\n\n<b>🆔 @Gamefa_official</b>"
     )
 
@@ -4103,9 +4134,21 @@ V59_NEWS_PROMPT = """
 تو سردبیر ارشد Gamefa هستی. هدف تو ساختن کوتاه‌ترین خبر کامل، دقیق، روان و جذاب است.
 
 قوانین قطعی:
-- متن فقط ۱ تا ۱۰ جمله؛ تعداد جمله باید متناسب با اهمیت و حجم اطلاعات باشد.
-- خبر ساده را کوتاه نگه دار؛ اگر ۲ جمله کافی است، ۲ جمله بنویس.
-- هیچ جمله‌ای برای پر کردن تعداد اضافه نشود.
+- متن نهایی بدنه باید کوتاه و فشرده باشد؛ از حاشیه‌روی و تکرار خودداری کن.
+- بدنه دقیقاً ۲ بند داشته باشد و هر بند دقیقاً ۴ خط باشد؛ مجموعاً ۸ خط.
+- هر خط حداکثر ۵۴ کاراکتر باشد و فقط بین کلمات شکسته شود.
+- برای رسیدن به ۸ خط، اطلاعات کم‌اهمیت را حذف کن، نه اینکه جمله‌های مصنوعی اضافه کنی.
+- خروجی باید با خط‌شکنی واقعی و دقیقاً با ساختار زیر باشد:
+  🔻 خط ۱
+  خط ۲
+  خط ۳
+  خط ۴
+
+  🔻 خط ۵
+  خط ۶
+  خط ۷
+  خط ۸
+- تیتر جدا از این ۸ خط است.
 - جمله اول باید مهم‌ترین اتفاق خبر باشد.
 - نام بازی، فیلم، افراد، شرکت‌ها، تاریخ‌ها، قیمت‌ها، اعداد و پلتفرم‌های حیاتی حفظ شوند.
 - هیچ عدد، تاریخ، نام یا ادعای تازه‌ای خارج از FACTS و منبع اضافه نکن.
@@ -4115,7 +4158,7 @@ V59_NEWS_PROMPT = """
 - جمله‌ها طبیعی و فارسی باشند و جمله با نام انگلیسی شروع نشود.
 - از تکرار نام و مفهوم یکسان در چند جمله خودداری کن.
 - هیچ تحلیل شخصی، حدس، هشتگ، لینک، ایموجی، Markdown یا توضیح درباره AI ننویس.
-- خروجی فقط تیتر در خط اول و یک پاراگراف در ادامه باشد.
+- خروجی فقط تیتر در خط اول و سپس بدنه دقیقاً ۲ بند ۴ خطی باشد؛ هیچ متن دیگری ننویس.
 """
 
 
